@@ -334,4 +334,3 @@ Phase one is complete only when:
 - Automated unit, UI, and backend compatibility tests pass.
 - No secrets or signing material are committed.
 - Existing Android and macOS clients continue to function.
-

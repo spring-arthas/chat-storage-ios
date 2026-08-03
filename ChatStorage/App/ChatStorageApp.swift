@@ -19,7 +19,12 @@ struct ChatStorageApp: App {
         }
         let user = uiTestMode == "authenticated" ? AuthenticatedUser.preview : nil
         let store = UserDefaultsServerConfigurationStore(defaults: UserDefaults(suiteName: "ChatStorage.UITests") ?? .standard)
-        let container = AppContainer(configurationStore: store, configuration: .default, authRepository: PreviewAuthRepository(user: user))
+        let container = AppContainer(
+            configurationStore: store,
+            configuration: .default,
+            authRepository: PreviewAuthRepository(user: user),
+            friendRepository: PreviewFriendRepository(friends: PreviewFriends.all)
+        )
         _container = State(initialValue: uiTestMode == nil ? AppContainer.live() : container)
     }
 
@@ -61,7 +66,11 @@ struct ChatStorageApp: App {
                     onOpenServerSettings: { showsServerSettings = true }
                 )
             case .authenticated(let user):
-                MainShellView(user: user, sampleMode: uiTestMode == "authenticated")
+                MainShellView(
+                    user: user,
+                    friendRepository: container.friendRepository,
+                    sampleMode: uiTestMode == "authenticated"
+                )
             }
         }
     }

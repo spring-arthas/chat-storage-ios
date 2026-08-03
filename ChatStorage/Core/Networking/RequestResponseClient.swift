@@ -79,12 +79,12 @@ actor RequestResponseClient: FrameRequesting {
                     do {
                         try await connection.send(frame)
                     } catch {
-                        await self.fail(identifier, with: error)
+                        self.fail(identifier, with: error)
                         return
                     }
                     do {
                         try await Task.sleep(for: timeout)
-                        await self.fail(identifier, with: RequestResponseError.timedOut)
+                        self.fail(identifier, with: RequestResponseError.timedOut)
                     } catch {
                         // Cancellation of the timeout helper is expected after a response.
                     }

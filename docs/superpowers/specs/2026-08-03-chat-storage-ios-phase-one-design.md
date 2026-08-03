@@ -182,6 +182,9 @@ Phase one includes the complete Android friend and chat behavior:
 - Friend event push handling.
 - Friend aliases.
 - Account-synchronized friend pinning.
+- The conversation overflow menu exposes pin/unpin, sends the existing `0x5C` request, handles the `0x5D` response, and immediately reorders the local conversation list after success.
+- Tapping a friend's avatar in a conversation opens a read-only friend profile screen showing the server-provided identity and relationship information.
+- The friend list removes the manual refresh toolbar button and uses native pull-to-refresh with visible loading, success, and recoverable error states.
 - Conversation ordering and unread counts.
 - Text message sending and receiving.
 - Delivery acknowledgement and explicit failure state.
@@ -190,6 +193,8 @@ Phase one includes the complete Android friend and chat behavior:
 - Persistent local chat cache.
 - Emoji selection and text insertion behavior.
 - Per-friend chat backgrounds.
+- Custom chat backgrounds use aspect-fill, cover the full conversation safe-area canvas, and clip overflow so letterboxing or black bands never appear above or below the message surface.
+- Conversation detail screens use native `NavigationStack` navigation and preserve the system screen-edge interactive-pop gesture. Full-width custom horizontal gestures must not intercept the left-edge back gesture or the iOS bottom app-switch gesture.
 - Chat attachment upload, send, download, recovery, and batch behavior.
 - Foreground socket restoration after interruption or app activation.
 
@@ -334,3 +339,4 @@ Phase one is complete only when:
 - Automated unit, UI, and backend compatibility tests pass.
 - No secrets or signing material are committed.
 - Existing Android and macOS clients continue to function.
+- A user can open friend details by tapping the chat avatar, pin or unpin from the chat overflow menu, pull to refresh the friend list, view a fully filled custom background, and return using the native left-edge swipe.

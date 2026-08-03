@@ -7,7 +7,15 @@ enum RequestResponseError: Error, Equatable, Sendable {
     case closed
 }
 
-actor RequestResponseClient {
+protocol FrameRequesting: Sendable {
+    func request(
+        _ frame: Frame,
+        expecting expectedTypes: Set<FrameType>,
+        timeout: Duration
+    ) async throws -> Frame
+}
+
+actor RequestResponseClient: FrameRequesting {
     nonisolated let pushes: AsyncStream<Frame>
 
     private struct PendingRequest {

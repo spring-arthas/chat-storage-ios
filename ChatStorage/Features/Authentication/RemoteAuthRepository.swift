@@ -15,6 +15,7 @@ actor RemoteAuthRepository: AuthRepository {
         let normalizedAccount = account.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedAccount.isEmpty else { throw AuthError.invalidAccount }
         guard !password.isEmpty else { throw AuthError.invalidPassword }
+        try await client.connect()
         let payload = try ProtocolJSON.encoder().encode(LoginRequest(username: normalizedAccount, password: password))
         let response = try await client.request(
             Frame(type: .userLoginRequest, payload: payload),
@@ -30,6 +31,7 @@ actor RemoteAuthRepository: AuthRepository {
               !token.isEmpty else {
             return nil
         }
+        try await client.connect()
         let payload = try ProtocolJSON.encoder().encode(SessionResumeRequest(sessionToken: token))
         let response = try await client.request(
             Frame(type: .userSessionResumeRequest, payload: payload),

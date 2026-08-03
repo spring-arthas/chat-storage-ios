@@ -14,7 +14,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "AD17D405F052D910F7E35968"
+               BlueprintIdentifier = "7548E66CCFA6C3A1D8901E57"
                BuildableName = "ChatStorage.app"
                BlueprintName = "ChatStorage"
                ReferencedContainer = "container:ChatStorage.xcodeproj">
@@ -28,7 +28,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "C453A819022BC554227376B4"
+               BlueprintIdentifier = "CA252CC3091B55B396D106E2"
                BuildableName = "ChatStorageTests.xctest"
                BlueprintName = "ChatStorageTests"
                ReferencedContainer = "container:ChatStorage.xcodeproj">
@@ -42,7 +42,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "72CE96026DB723EE746A48E9"
+               BlueprintIdentifier = "07B67131E91DB7369536AF5E"
                BuildableName = "ChatStorageUITests.xctest"
                BlueprintName = "ChatStorageUITests"
                ReferencedContainer = "container:ChatStorage.xcodeproj">
@@ -58,7 +58,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "AD17D405F052D910F7E35968"
+            BlueprintIdentifier = "7548E66CCFA6C3A1D8901E57"
             BuildableName = "ChatStorage.app"
             BlueprintName = "ChatStorage"
             ReferencedContainer = "container:ChatStorage.xcodeproj">
@@ -69,7 +69,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "C453A819022BC554227376B4"
+               BlueprintIdentifier = "CA252CC3091B55B396D106E2"
                BuildableName = "ChatStorageTests.xctest"
                BlueprintName = "ChatStorageTests"
                ReferencedContainer = "container:ChatStorage.xcodeproj">
@@ -79,7 +79,7 @@
             skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "72CE96026DB723EE746A48E9"
+               BlueprintIdentifier = "07B67131E91DB7369536AF5E"
                BuildableName = "ChatStorageUITests.xctest"
                BlueprintName = "ChatStorageUITests"
                ReferencedContainer = "container:ChatStorage.xcodeproj">
@@ -101,7 +101,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "AD17D405F052D910F7E35968"
+            BlueprintIdentifier = "7548E66CCFA6C3A1D8901E57"
             BuildableName = "ChatStorage.app"
             BlueprintName = "ChatStorage"
             ReferencedContainer = "container:ChatStorage.xcodeproj">
@@ -118,7 +118,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "AD17D405F052D910F7E35968"
+            BlueprintIdentifier = "7548E66CCFA6C3A1D8901E57"
             BuildableName = "ChatStorage.app"
             BlueprintName = "ChatStorage"
             ReferencedContainer = "container:ChatStorage.xcodeproj">

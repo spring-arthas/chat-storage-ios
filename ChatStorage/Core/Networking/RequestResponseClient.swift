@@ -8,6 +8,8 @@ enum RequestResponseError: Error, Equatable, Sendable {
 }
 
 protocol FrameRequesting: Sendable {
+    func connect() async throws
+
     func request(
         _ frame: Frame,
         expecting expectedTypes: Set<FrameType>,

@@ -20,6 +20,16 @@ final class RemoteAuthRepositoryTests: XCTestCase {
         XCTAssertNotNil(try store.data(for: .currentUser))
     }
 
+    func testLoginConnectsBeforeSendingCredentials() async throws {
+        let client = FakeFrameRequestClient(response: .success(userResponse()))
+        let repository = RemoteAuthRepository(client: client, secureStore: MemorySecureStore())
+
+        _ = try await repository.login(account: "alice", password: "secret")
+
+        let events = await client.events
+        XCTAssertEqual(events, ["connect", "request"])
+    }
+
     func testLoginRejectionClearsStoredSession() async {
         let client = FakeFrameRequestClient(response: .success(errorResponse(code: "PASSWORD_INVALID")))
         let store = MemorySecureStore()
@@ -110,12 +120,18 @@ final class RemoteAuthRepositoryTests: XCTestCase {
 actor FakeFrameRequestClient: FrameRequesting {
     private let response: Result<Frame, Error>
     private(set) var sentFrames: [Frame] = []
+    private(set) var events: [String] = []
 
     init(response: Result<Frame, Error>) {
         self.response = response
     }
 
+    func connect() async throws {
+        events.append("connect")
+    }
+
     func request(_ frame: Frame, expecting: Set<FrameType>, timeout: Duration) async throws -> Frame {
+        events.append("request")
         sentFrames.append(frame)
         return try response.get()
     }

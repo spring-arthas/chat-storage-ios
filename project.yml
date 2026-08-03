@@ -1,0 +1,9 @@
+name: ChatStorage
+bundleIdentifier: com.alibaba.chatstorage.ios
+deploymentTarget: "26.0"
+swiftVersion: "6.0"
+developmentTeam: ""
+targets:
+  app: ChatStorage
+  unitTests: ChatStorageTests
+  uiTests: ChatStorageUITests

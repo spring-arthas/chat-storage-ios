@@ -10,11 +10,51 @@ struct LoginRequest: Codable, Equatable, Sendable {
     }
 }
 
+// [修改] 与 macOS 和 net-server 的 0x30 注册 JSON 保持一致；头像字段为空时不编码。
+struct RegisterRequest: Codable, Equatable, Sendable {
+    let username: String
+    let password: String
+    let email: String
+    let avatarData: String?
+    let avatarName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case username = "userName"
+        case password
+        case email = "mail"
+        case avatarData
+        case avatarName
+    }
+}
+
 struct SessionResumeRequest: Codable, Equatable, Sendable {
     let sessionToken: String
 }
 
+// [修改] 控制连接心跳使用独立 nonce，响应必须原样回显后才算当前连接可用。
+struct HeartbeatRequest: Codable, Equatable, Sendable {
+    let nonce: String
+}
+
+struct HeartbeatResponseEnvelope: Decodable, Equatable, Sendable {
+    let success: Bool
+    let message: String
+    let data: HeartbeatResponseData?
+    let errorCode: String?
+}
+
+struct HeartbeatResponseData: Decodable, Equatable, Sendable {
+    let nonce: String
+    let serverTime: Int64?
+}
+
 struct LogoutRequest: Codable, Equatable, Sendable {}
+
+// [修改] 头像更新帧 0x45 的请求体，avatarData 为 base64 图片内容。
+struct UpdateAvatarRequest: Codable, Equatable, Sendable {
+    let avatarData: String
+    let avatarName: String
+}
 
 struct UserResponseEnvelope: Decodable, Equatable, Sendable {
     let success: Bool?
@@ -98,6 +138,22 @@ struct AuthenticatedUser: Codable, Equatable, Sendable {
         try values.encodeIfPresent(status, forKey: FlexibleKey("status"))
         try values.encodeIfPresent(transferToken, forKey: FlexibleKey("transferToken"))
         try values.encodeIfPresent(sessionToken, forKey: FlexibleKey("sessionToken"))
+    }
+}
+
+// [修改] 仅从服务端 transferToken 中读取毫秒过期时间用于本地提前刷新；身份和签名仍全部由服务端校验。
+enum TransferTokenExpiration {
+    static func expirationDate(from token: String?) -> Date? {
+        guard let token else { return nil }
+        let parts = token
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 5,
+              let expiresAtMilliseconds = Int64(parts[2]),
+              expiresAtMilliseconds > 0 else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: Double(expiresAtMilliseconds) / 1_000)
     }
 }
 

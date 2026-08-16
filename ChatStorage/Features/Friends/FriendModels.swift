@@ -60,10 +60,11 @@ struct ChatFriend: Codable, Equatable, Identifiable, Hashable, Sendable {
         avatar = try values.first(String.self, ["avatar"])
         unreadCount = try values.first(Int.self, ["unreadCount", "unread_count", "unreadMsgCount", "unreadMessageCount"]) ?? 0
         latestMessage = try values.first(String.self, ["latestUnreadMsg", "latestMsg", "lastMsg", "latestMessage", "lastMessage"])
-        let online = try values.bool(["online"])
+        // [修改] 同时兼容服务端字段和 Swift 本地 Codable 字段，避免缓存重载丢状态。
+        let online = try values.bool(["online", "isOnline"])
         let onlineStatus = try values.first(String.self, ["onlineStatus"])
         isOnline = online ?? (onlineStatus?.uppercased() == "ONLINE")
-        isPinned = try values.bool(["pinned"]) ?? false
+        isPinned = try values.bool(["pinned", "isPinned"]) ?? false
         pinnedAt = try values.first(Int64.self, ["pinnedAt"])
     }
 }

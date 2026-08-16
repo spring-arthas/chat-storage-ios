@@ -2,7 +2,8 @@ import Foundation
 
 enum FrameCodec {
     static let headerSize = 8
-    static let maximumPayloadSize = 100 * 1024 * 1024
+    // [修改] 与 net-server 上传、下载和控制帧统一 10 MiB，拒绝异常长度造成的内存占用。
+    static let maximumPayloadSize = 10 * 1024 * 1024
 
     private static let magicFirst: UInt8 = 0xFA
     private static let magicSecond: UInt8 = 0xCE

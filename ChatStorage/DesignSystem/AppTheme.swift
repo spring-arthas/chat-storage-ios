@@ -10,6 +10,13 @@ enum AppTheme {
     static let archiveViolet = Color(red: 0.48, green: 0.38, blue: 0.75)
 }
 
+enum AppSystemSymbols {
+    // [修改] 集中保存真机已验证可用的 SF Symbol，避免无效名称让操作按钮显示为空白。
+    static let chatSettings = "gearshape.fill"
+    static let directory = "folder.fill"
+    static let selectedDirectoryBadge = "checkmark.circle.fill"
+}
+
 struct GlassCard: ViewModifier {
     func body(content: Content) -> some View {
         content

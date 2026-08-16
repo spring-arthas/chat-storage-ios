@@ -10,7 +10,7 @@ open /Users/hljy/iosProjects/chat-storage-ios/ChatStorage.xcodeproj
 
 Select the `ChatStorage` scheme and an iPhone 17 Pro Max simulator, then press Run. The default private-server configuration mirrors the current Android client:
 
-- Host: `172.21.33.156`
+- Host: `172.21.32.64`
 - Control: `10086`
 - Upload: `10087`
 - Download: `10088`

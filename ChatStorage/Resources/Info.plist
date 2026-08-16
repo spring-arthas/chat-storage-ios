@@ -22,8 +22,15 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- [修改] Documents/Downloads 允许在系统文件 App 中查看和取出下载文件。 -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>用于连接你的 Chat Storage 私人服务器并同步消息与文件。</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>用于解锁 Chat Storage 和恢复已保存的登录会话。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -41,6 +48,9 @@
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+		<!-- [修改] 视频全屏播放允许用户按设备方向切换横屏和竖屏。 -->
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 </dict>
 </plist>

@@ -61,7 +61,20 @@ enum FrameType: UInt8, CaseIterable, Sendable {
     case chatMessageActionPush = 0x5B
     case friendPinUpdateRequest = 0x5C
     case friendPinUpdateResponse = 0x5D
+    case chatMessageSearchRequest = 0x5E
+    case chatMessageSearchResponse = 0x5F
 
     case dynamicCreateRequest = 0x60
-    case dynamicResponse = 0x61
+    case dynamicCreateResponse = 0x61
+    case dynamicTimelineRequest = 0x62
+    case dynamicTimelineResponse = 0x63
+    case dynamicActionRequest = 0x64
+    case dynamicActionResponse = 0x65
+    case dynamicDetailRequest = 0x66
+    case dynamicDetailResponse = 0x67
+    case dynamicDeleteRequest = 0x68
+    case dynamicDeleteResponse = 0x69
+
+    // [修改] 保留旧调用点名称，0x61 仍是发布动态回执。
+    static var dynamicResponse: FrameType { .dynamicCreateResponse }
 }

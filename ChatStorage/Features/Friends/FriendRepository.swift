@@ -1,8 +1,13 @@
 import Foundation
 
 protocol FriendRepository: Sendable {
+    func cachedFriends() async -> [ChatFriend]
     func refresh() async throws -> [ChatFriend]
     func updatePin(relationshipId: Int64, pinned: Bool) async throws -> FriendPinState
+}
+
+extension FriendRepository {
+    func cachedFriends() async -> [ChatFriend] { [] }
 }
 
 enum FriendRepositoryError: Error, Equatable, LocalizedError, Sendable {

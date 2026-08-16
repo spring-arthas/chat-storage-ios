@@ -63,3 +63,9 @@ fastlane/test_output
 
 # Local isolated development worktrees
 .worktrees/
+
+# [修改] 排除本地系统、IDE 与 Xcode 构建产物，避免把非源码内容推送到远程。
+.DS_Store
+.idea/
+build/
+DerivedData/

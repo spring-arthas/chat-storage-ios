@@ -29,11 +29,12 @@ final class FrameCodecTests: XCTestCase {
         }
     }
 
-    func testDecodeRejectsPayloadOverOneHundredMiB() {
-        let header = Data([0xFA, 0xCE, 0x31, 0, 0x06, 0x40, 0x00, 0x01])
+    // [修改] 客户端和 net-server 统一 10 MiB 单帧上限，异常长度不能长期占用内存等待数据。
+    func testDecodeRejectsPayloadOverTenMiB() {
+        let header = Data([0xFA, 0xCE, 0x31, 0, 0x00, 0xA0, 0x00, 0x01])
 
         XCTAssertThrowsError(try FrameCodec.decode(header)) { error in
-            XCTAssertEqual(error as? ProtocolError, .invalidPayloadLength(104_857_601))
+            XCTAssertEqual(error as? ProtocolError, .invalidPayloadLength(10_485_761))
         }
     }
 

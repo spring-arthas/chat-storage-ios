@@ -23,9 +23,13 @@ final class LoginViewModel {
         self.password = initialPassword
     }
 
-    // [修改] 生产入口固定为空账号和空密码，联调凭据不得写入 App 源码或安装包。
+    // 测试阶段预填联调账号，避免每次真机安装后重复输入。
     static func production(repository: any AuthRepository) -> LoginViewModel {
-        LoginViewModel(repository: repository)
+        LoginViewModel(
+            repository: repository,
+            initialAccount: "18806504525",
+            initialPassword: "spring"
+        )
     }
 
     func login() async {

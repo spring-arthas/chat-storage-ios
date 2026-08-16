@@ -123,7 +123,7 @@ actor RequestResponseClient: FrameRequesting {
 
     func reconnect() async throws {
         guard !isClosed else { throw RequestResponseError.closed }
-        // [修改] 旧连接上的在途请求不能跨 TLS 连接继续等待响应。
+        // 旧连接上的在途请求不能跨 TCP 连接继续等待响应。
         failAll(with: ConnectionError.disconnected)
         try await connection.reconnect()
     }

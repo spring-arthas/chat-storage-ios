@@ -12,8 +12,13 @@ enum TransportSecurity {
         return try? Data(contentsOf: url)
     }()
 
-    // [修改] 所有自定义帧连接强制 TLS 1.2 以上，只信任 App 内置 CA 并校验当前服务器主机名。
-    static func makeParameters(expectedHost: String) -> NWParameters {
+    // 自定义帧端口 10086/10087/10088 与 macOS 客户端和服务端保持一致，使用普通 TCP。
+    static func makePlainTCPParameters() -> NWParameters {
+        NWParameters(tls: nil, tcp: NWProtocolTCP.Options())
+    }
+
+    // 保留 Socket TLS 参数构造能力；当前自定义帧端口不使用，媒体 HTTPS 仍使用下方信任校验。
+    static func makeTLSParameters(expectedHost: String) -> NWParameters {
         let tls = NWProtocolTLS.Options()
         sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
         sec_protocol_options_set_peer_authentication_required(tls.securityProtocolOptions, true)

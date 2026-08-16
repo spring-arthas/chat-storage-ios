@@ -18,7 +18,7 @@ struct ServerSettingsDraft: Equatable, Sendable {
     }
 }
 
-struct TLSServerConnectionTester: Sendable {
+struct ControlServerConnectionTester: Sendable {
     private let connectionFactory: @Sendable (ServerConfiguration) -> any ControlConnection
 
     init(
@@ -31,7 +31,7 @@ struct TLSServerConnectionTester: Sendable {
 
     func test(configuration: ServerConfiguration) async throws {
         let connection = connectionFactory(configuration)
-        // [修改] 测试连接始终是独立 TLS Socket，成功或失败都立即关闭，不影响登录连接。
+        // 测试连接始终是独立的普通 TCP Socket，成功或失败都立即关闭，不影响登录连接。
         do {
             try await connection.connect()
             await connection.disconnect()
@@ -80,12 +80,12 @@ struct ServerSettingsView: View {
     @State private var message: String?
     @State private var isSaving = false
     @State private var connectionTestState: ServerConnectionTestState = .idle
-    private let connectionTester: TLSServerConnectionTester
+    private let connectionTester: ControlServerConnectionTester
     let onSave: (ServerConfiguration) async throws -> Void
 
     init(
         configuration: ServerConfiguration,
-        connectionTester: TLSServerConnectionTester = TLSServerConnectionTester(),
+        connectionTester: ControlServerConnectionTester = ControlServerConnectionTester(),
         onSave: @escaping (ServerConfiguration) async throws -> Void
     ) {
         _host = State(initialValue: configuration.host)
@@ -117,7 +117,7 @@ struct ServerSettingsView: View {
                         Task { await testConnection() }
                     } label: {
                         HStack {
-                            Text("测试 TLS 连接")
+                            Text("测试控制连接")
                             Spacer()
                             if visibleConnectionTestState == .testing { ProgressView().controlSize(.small) }
                         }
@@ -128,7 +128,7 @@ struct ServerSettingsView: View {
                     case .idle, .testing:
                         EmptyView()
                     case .succeeded:
-                        Label("控制端口 TLS 连接成功", systemImage: "checkmark.circle.fill")
+                        Label("控制端口 TCP 连接成功", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                     case .failed(let detail):
                         Label(detail, systemImage: "xmark.octagon.fill")
@@ -202,7 +202,7 @@ struct ServerSettingsView: View {
                 return
             }
             connectionTestState = .failed(
-                detail.isEmpty ? "TLS 连接失败" : detail,
+                detail.isEmpty ? "控制连接失败" : detail,
                 testedDraft: testedDraft
             )
         }

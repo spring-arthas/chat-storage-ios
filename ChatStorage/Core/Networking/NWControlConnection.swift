@@ -27,7 +27,7 @@ private final class NWControlTransport: ControlTransport, @unchecked Sendable {
         connection = NWConnection(
             host: NWEndpoint.Host(host),
             port: NWEndpoint.Port(rawValue: port)!,
-            using: TransportSecurity.makeParameters(expectedHost: host)
+            using: TransportSecurity.makePlainTCPParameters()
         )
     }
 
@@ -141,7 +141,7 @@ actor NWControlConnection: ControlConnection {
             throw ConnectionError.invalidPort(configuration.controlPort)
         }
 
-        // [修改] 登录密码、会话令牌和控制帧只允许通过 TLS 连接发送。
+        // 控制端口 10086 与服务端约定使用普通 TCP，不发送 TLS ClientHello。
         let candidate = transportFactory(configuration.host, port)
         connectionGeneration += 1
         connection = candidate
@@ -155,7 +155,7 @@ actor NWControlConnection: ControlConnection {
         try await awaitConnection(candidate, timeout: .seconds(10))
     }
 
-    // [修改] 心跳失败时不能相信旧 transport 的 ready 状态，保留 frames 订阅并强制重建 TCP/TLS。
+    // 心跳失败时不能相信旧 transport 的 ready 状态，保留 frames 订阅并强制重建 TCP。
     func reconnect() async throws {
         guard !isClosed else { throw ConnectionError.disconnected }
         if let active = connection {
@@ -330,7 +330,7 @@ actor NWControlConnection: ControlConnection {
         connectionGeneration += 1
         decoder = FrameStreamDecoder()
         resumeConnectContinuations(throwing: connectError)
-        // [修改] transport 失效时同步结束在途和排队 send，旧帧不能跨 TLS 代次继续执行。
+        // transport 失效时同步结束在途和排队 send，旧帧不能跨 TCP 连接代次继续执行。
         failSendOperations(for: invalidatedGeneration, throwing: connectError)
         if cancel { candidate.cancel() }
     }

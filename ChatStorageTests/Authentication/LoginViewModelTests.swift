@@ -3,13 +3,13 @@ import XCTest
 
 @MainActor
 final class LoginViewModelTests: XCTestCase {
-    func testProductionLoginModelDoesNotPrefillCredentials() {
+    func testProductionLoginModelPrefillsTestCredentials() {
         let repository = FakeAuthRepository(loginResult: .success(.fixture))
 
         let model = LoginViewModel.production(repository: repository)
 
-        XCTAssertEqual(model.account, "")
-        XCTAssertEqual(model.password, "")
+        XCTAssertEqual(model.account, "18806504525")
+        XCTAssertEqual(model.password, "spring")
     }
 
     func testRegistrationRejectsMismatchedPasswordsWithoutCallingRepository() async {

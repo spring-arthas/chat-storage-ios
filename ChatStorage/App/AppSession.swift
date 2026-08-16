@@ -350,7 +350,7 @@ final class AppSession {
         isActivating = true
         defer { isActivating = false }
         do {
-            // [修改] 每次退避尝试都先销毁旧 TCP/TLS，不能在表面 ready 的坏连接上发送 0x46。
+            // 每次退避尝试都先销毁旧 TCP，不能在表面 ready 的坏连接上发送 0x46。
             try await repository.reconnect()
             try Task.checkCancellation()
             let user = try await repository.activate()

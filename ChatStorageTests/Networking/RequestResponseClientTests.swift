@@ -112,7 +112,7 @@ final class RequestResponseClientTests: XCTestCase {
         await connection.disconnect()
     }
 
-    // [修改] 心跳失败时即使旧 transport 仍显示 ready，也必须强制换一条新的 TCP/TLS 连接。
+    // 心跳失败时即使旧 transport 仍显示 ready，也必须强制换一条新的 TCP 连接。
     func testExplicitReconnectReplacesReadyTransportAndKeepsFramesStreamOpen() async throws {
         let firstTransport = FakeControlTransport()
         let secondTransport = FakeControlTransport()
@@ -128,7 +128,7 @@ final class RequestResponseClientTests: XCTestCase {
         XCTAssertEqual(firstTransport.cancelCallCount, 1)
         XCTAssertEqual(transportFactory.creationCount, 2)
 
-        let expectedFrame = Frame(type: .friendEventPush, payload: Data("new-tls-connection".utf8))
+        let expectedFrame = Frame(type: .friendEventPush, payload: Data("new-tcp-connection".utf8))
         let receivedFrameTask = Task { try await nextFrame(from: connection.frames) }
         secondTransport.deliver(data: try FrameCodec.encode(expectedFrame))
 
@@ -310,7 +310,7 @@ final class RequestResponseClientTests: XCTestCase {
         await connection.disconnect()
     }
 
-    // [修改] 旧 TLS 上排队的帧不能在 reconnect 后借用新 transport 发送。
+    // 旧 TCP 连接上排队的帧不能在 reconnect 后借用新 transport 发送。
     func testReconnectRejectsQueuedFramesFromPreviousTransport() async throws {
         let firstTransport = FakeControlTransport(automaticallyCompletesSends: false)
         let secondTransport = FakeControlTransport()

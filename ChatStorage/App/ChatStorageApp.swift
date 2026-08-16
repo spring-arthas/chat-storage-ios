@@ -223,7 +223,7 @@ struct ChatStorageApp: App {
 
     private var loginView: some View {
         LoginView(
-            // [修改] 生产登录页不再预填任何联调账号或密码。
+            // 测试阶段使用预填的联调账号和密码。
             model: LoginViewModel.production(repository: container.authRepository),
             authRepository: container.authRepository,
             serverDescription: "\(container.configuration.host):\(container.configuration.controlPort)",

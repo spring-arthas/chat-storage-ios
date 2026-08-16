@@ -260,7 +260,7 @@ final class AppSessionTests: XCTestCase {
         await session.logout()
     }
 
-    // [修改] 心跳失败后先重建 TLS 连接，再用 0x46 恢复会话和最新令牌。
+    // 心跳失败后先重建 TCP 连接，再用 0x46 恢复会话和最新令牌。
     func testHeartbeatFailureReconnectsAndResumesSession() async {
         let refreshed = AuthenticatedUser.fixture(
             transferToken: "transfer-after-reconnect",

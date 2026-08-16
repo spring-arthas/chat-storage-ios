@@ -186,11 +186,11 @@ actor NWTransferFrameTransport: TransferFrameTransport {
             throw ConnectionError.invalidPort(port)
         }
 
-        // [修改] 文件内容和 transferToken 必须走 TLS，禁止裸 TCP 传输。
+        // 与 macOS 客户端及服务端 10087/10088 保持一致：文件传输使用普通 TCP 帧连接。
         let candidate = NWConnection(
             host: NWEndpoint.Host(host),
             port: endpointPort,
-            using: TransportSecurity.makeParameters(expectedHost: host)
+            using: TransportSecurity.makePlainTCPParameters()
         )
         connection = candidate
         candidate.stateUpdateHandler = { [weak self, weak candidate] state in

@@ -90,7 +90,7 @@ actor RemoteAuthRepository: AuthRepository {
         try await resumeSession()
     }
 
-    // [修改] AppSession 重连阶段先替换 TCP/TLS，再由 activate() 发送 0x46。
+    // AppSession 重连阶段先替换 TCP，再由 activate() 发送 0x46。
     func reconnect() async throws {
         try await client.reconnect()
     }

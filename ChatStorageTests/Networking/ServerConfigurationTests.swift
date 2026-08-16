@@ -54,13 +54,17 @@ final class ServerConfigurationTests: XCTestCase {
         XCTAssertNotEqual(first.storageScopeID, otherPort.storageScopeID)
     }
 
-    // [修改] 登录、控制和文件传输连接必须包含 TLS 协议层，禁止退回裸 TCP。
-    func testTransportParametersRequireTLS() {
-        let parameters = TransportSecurity.makeParameters(expectedHost: "172.21.32.64")
+    func testCustomFrameTransportParametersUsePlainTCP() {
+        let parameters = TransportSecurity.makePlainTCPParameters()
 
-        XCTAssertTrue(
+        XCTAssertTrue(parameters.defaultProtocolStack.transportProtocol is NWProtocolTCP.Options)
+        XCTAssertFalse(
             parameters.defaultProtocolStack.applicationProtocols.contains { $0 is NWProtocolTLS.Options }
         )
+    }
+
+    // 自定义帧端口改为普通 TCP 后，媒体资源仍必须通过 HTTPS 获取。
+    func testMediaTransportRemainsHTTPS() {
         XCTAssertEqual(TransportSecurity.mediaScheme, "https")
     }
 
@@ -111,7 +115,7 @@ final class ServerConfigurationTests: XCTestCase {
         XCTAssertThrowsError(try draft.configuration())
     }
 
-    // [修改] TLS 测试页必须展示可读的底层 Socket/TLS 错误，不能退化为 NSError 域名。
+    // 连接测试页必须展示可读的底层 Socket 错误，不能退化为 NSError 域名。
     func testConnectionErrorProvidesStableLocalizedDescriptions() {
         XCTAssertEqual(ConnectionError.invalidPort(70_000).errorDescription, "端口无效：70000")
         XCTAssertEqual(ConnectionError.failed("证书不受信任").errorDescription, "证书不受信任")
@@ -142,10 +146,10 @@ final class ServerConfigurationTests: XCTestCase {
         XCTAssertEqual(state.visibleState(for: changed), .idle)
     }
 
-    func testTLSServerConnectionTesterDisconnectsIndependentConnectionAfterSuccess() async throws {
+    func testControlServerConnectionTesterDisconnectsIndependentConnectionAfterSuccess() async throws {
         let connection = ServerTestControlConnection(result: .success(()))
         let factory = ServerTestConnectionFactory(connection: connection)
-        let tester = TLSServerConnectionTester(connectionFactory: factory.make)
+        let tester = ControlServerConnectionTester(connectionFactory: factory.make)
         let configuration = try ServerConfiguration(host: "server.lan", controlPort: 20_086)
 
         try await tester.test(configuration: configuration)
@@ -156,17 +160,17 @@ final class ServerConfigurationTests: XCTestCase {
         XCTAssertEqual(counts.disconnect, 1)
     }
 
-    func testTLSServerConnectionTesterDisconnectsIndependentConnectionAfterFailure() async throws {
-        let connection = ServerTestControlConnection(result: .failure(ConnectionError.failed("证书不受信任")))
+    func testControlServerConnectionTesterDisconnectsIndependentConnectionAfterFailure() async throws {
+        let connection = ServerTestControlConnection(result: .failure(ConnectionError.failed("连接被拒绝")))
         let factory = ServerTestConnectionFactory(connection: connection)
-        let tester = TLSServerConnectionTester(connectionFactory: factory.make)
+        let tester = ControlServerConnectionTester(connectionFactory: factory.make)
         let configuration = try ServerConfiguration(host: "server.lan", controlPort: 20_086)
 
         do {
             try await tester.test(configuration: configuration)
-            XCTFail("Expected TLS connection failure")
+            XCTFail("Expected TCP connection failure")
         } catch {
-            XCTAssertEqual(error as? ConnectionError, .failed("证书不受信任"))
+            XCTAssertEqual(error as? ConnectionError, .failed("连接被拒绝"))
         }
 
         let counts = await connection.counts()

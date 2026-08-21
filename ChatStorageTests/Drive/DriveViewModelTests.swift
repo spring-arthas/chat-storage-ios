@@ -1808,7 +1808,7 @@ final class DriveViewModelTests: XCTestCase {
         await model.load()
         let file = try XCTUnwrap(model.entries.first(where: \.isFile))
 
-        await model.rename(file, name: "新名称.pdf")
+        await model.rename(file, name: "新名称")
 
         let renamed = await repository.renamedFiles
         XCTAssertEqual(renamed.first?.0, file.id)
@@ -1830,17 +1830,70 @@ final class DriveViewModelTests: XCTestCase {
         XCTAssertEqual(renamed.first?.1, "新名称.pdf")
     }
 
-    // [修改] 用户明确填写新扩展名时不能被原扩展名覆盖。
-    func testRenameFileKeepsExplicitReplacementExtension() async throws {
+    // [修改] 文件重命名禁止输入新的扩展名，避免名称改变后丢失视频类型并影响播放入口。
+    func testRenameFileRejectsNameWithExtensionWithoutCallingRepository() async throws {
         let repository = DriveRepositorySpy()
         let model = DriveViewModel(repository: repository)
         await model.load()
         let file = try XCTUnwrap(model.entries.first(where: \.isFile))
 
-        await model.rename(file, name: "新名称.docx")
+        let renamed = await model.rename(file, name: "新名称.docx")
 
-        let renamed = await repository.renamedFiles
-        XCTAssertEqual(renamed.first?.1, "新名称.docx")
+        XCTAssertFalse(renamed)
+        XCTAssertEqual(model.errorMessage, "文件名称不能包含扩展名")
+        let renameCalls = await repository.renamedFiles
+        XCTAssertTrue(renameCalls.isEmpty)
+    }
+
+    // [修改] MKV 是项目支持的视频扩展名，即使系统 UTType 未注册也不能作为主文件名后缀提交。
+    func testRenameFileRejectsProjectSupportedDynamicExtension() async throws {
+        let repository = DriveRepositorySpy()
+        let model = DriveViewModel(repository: repository)
+        await model.load()
+        let file = try XCTUnwrap(model.entries.first(where: \.isFile))
+
+        let renamed = await model.rename(file, name: "新名称.mkv")
+
+        XCTAssertFalse(renamed)
+        XCTAssertEqual(model.errorMessage, "文件名称不能包含扩展名")
+        let renameCalls = await repository.renamedFiles
+        XCTAssertTrue(renameCalls.isEmpty)
+    }
+
+    // [修改] 主文件名内部允许点号，保存时仍只在末尾补回原扩展名。
+    func testRenameFileAllowsDotsInsideStemAndPreservesOriginalExtension() async {
+        let repository = DriveRepositorySpy()
+        let model = DriveViewModel(repository: repository)
+        await model.load()
+        let file = DriveFileEntry.file(id: 101, parentId: 1, name: "报告.final.pdf")
+
+        let renamed = await model.rename(file, name: "报告.v2")
+
+        XCTAssertTrue(renamed)
+        let renameCalls = await repository.renamedFiles
+        XCTAssertEqual(renameCalls.first?.1, "报告.v2.pdf")
+    }
+
+    // [修改] 视频只改主文件名后必须保留原扩展名，列表仍能进入按 fileId 获取地址的播放链路。
+    func testRenamedVideoPreservesExtensionAndRemainsPlayable() {
+        let renamed = DriveFileNameRules.applyingPreservedExtension(
+            to: "暑假旅行",
+            originalFileName: "旅行.mov"
+        )
+        let video = DriveFileEntry(
+            id: 101,
+            parentId: 1,
+            name: renamed,
+            size: 128,
+            fileType: "",
+            isFile: true,
+            hasChildren: false,
+            modifiedAt: nil
+        )
+
+        XCTAssertEqual(renamed, "暑假旅行.mov")
+        XCTAssertTrue(DriveFileOpenRules.isVideo(video))
+        XCTAssertEqual(video.id, 101)
     }
 
     // [修改] 文件编辑框隐藏扩展名，文件夹中的点号仍属于原名称。

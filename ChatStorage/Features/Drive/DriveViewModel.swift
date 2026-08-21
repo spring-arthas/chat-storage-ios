@@ -342,6 +342,11 @@ final class DriveViewModel {
             return false
         }
         let editedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        // [修改] 文件重命名只允许填写主文件名，禁止替换扩展名导致文件类型和播放入口失效。
+        if entry.isFile, DriveFileNameRules.containsRegisteredExtension(editedName) {
+            errorMessage = "文件名称不能包含扩展名"
+            return false
+        }
         // [修改] 文件未填写扩展名时自动保留原扩展名；目录仍按原输入重命名。
         let value = entry.isFile
             ? DriveFileNameRules.applyingPreservedExtension(to: editedName, originalFileName: entry.name)

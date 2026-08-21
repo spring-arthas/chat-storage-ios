@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 struct DriveFileEntry: Codable, Equatable, Identifiable, Sendable {
     let id: Int64
@@ -145,6 +146,12 @@ enum DriveDynamicDraftBuilder {
 
 // [修改] 与 macOS 共用同一套重命名体感：编辑主文件名，保存时保留原扩展名。
 enum DriveFileNameRules {
+    // [修改] 业务支持但系统 UTType 未必注册的扩展名也必须按真实扩展名拦截。
+    private static let supportedExtensions: Set<String> = [
+        "jpg", "jpeg", "png", "heic", "gif", "webp",
+        "mp4", "mov", "m4v", "mkv", "avi", "webm"
+    ]
+
     static func editableName(for entry: DriveFileEntry) -> String {
         guard entry.isFile else { return entry.name }
         let fileExtension = normalizedExtension(from: entry.name)
@@ -158,10 +165,19 @@ enum DriveFileNameRules {
 
         let originalExtension = normalizedExtension(from: originalFileName)
         guard !originalExtension.isEmpty else { return trimmed }
-
-        let editedExtension = normalizedExtension(from: trimmed)
-        guard editedExtension.isEmpty else { return trimmed }
+        // [修改] 文件重命名只能改主文件名，任何调用入口都必须保留原扩展名。
         return "\(trimmed).\(originalExtension)"
+    }
+
+    static func containsRegisteredExtension(_ value: String) -> Bool {
+        let fileExtension = normalizedExtension(from: value)
+        guard !fileExtension.isEmpty else { return false }
+        if supportedExtensions.contains(fileExtension) { return true }
+        guard let contentType = UTType(filenameExtension: fileExtension) else {
+            return false
+        }
+        // [修改] final、v2 这类点号后缀是动态类型，仍属于主文件名；只拦截 PDF、MOV 等真实扩展名。
+        return !contentType.isDynamic
     }
 
     private static func normalizedExtension(from value: String) -> String {

@@ -8,9 +8,9 @@ Native SwiftUI client for `chat-storage` and `net-server`, targeting iPhone and 
 open /Users/hljy/iosProjects/chat-storage-ios/ChatStorage.xcodeproj
 ```
 
-Select the `ChatStorage` scheme and an iPhone 17 Pro Max simulator, then press Run. The default private-server configuration mirrors the current Android client:
+Select the `ChatStorage` scheme and an iPhone 17 Pro Max simulator, then press Run. The service ports mirror the current Android client. The host is only a placeholder prefilled in **server settings** — the actual host used for login and video playback is whatever you configure there:
 
-- Host: `172.21.32.64`
+- Host: `server.example.com` (placeholder; set the server's address in settings — no IP is hardcoded)
 - Control: `10086`
 - Upload: `10087`
 - Download: `10088`

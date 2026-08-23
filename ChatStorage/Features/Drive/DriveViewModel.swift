@@ -6,6 +6,13 @@ protocol DriveTransferManaging: FileDownloadManaging {
     func upload(sourceURL: URL, targetDirectoryId: Int64, uploadPurpose: String, batchId: String?) async throws -> UploadResult
     func previewFile(remoteFileId: Int64, fileName: String, fileSize: Int64) async throws -> URL
     func thumbnailData(remoteFileId: Int64, fileName: String, fileSize: Int64, maximumBytes: Int64) async throws -> Data
+    func thumbnailRangeData(
+        remoteFileId: Int64,
+        fileName: String,
+        fileSize: Int64,
+        startOffset: Int64,
+        length: Int64
+    ) async throws -> Data
     func downloadUnique(
         remoteFileId: Int64,
         fileName: String,
@@ -32,6 +39,24 @@ extension DriveTransferManaging {
     ) async throws -> Data {
         let url = try await previewFile(remoteFileId: remoteFileId, fileName: fileName, fileSize: fileSize)
         return try Data(contentsOf: url)
+    }
+
+    func thumbnailRangeData(
+        remoteFileId: Int64,
+        fileName: String,
+        fileSize: Int64,
+        startOffset: Int64,
+        length: Int64
+    ) async throws -> Data {
+        let url = try await previewFile(remoteFileId: remoteFileId, fileName: fileName, fileSize: fileSize)
+        let data = try Data(contentsOf: url)
+        guard startOffset >= 0,
+              length > 0,
+              startOffset < Int64(data.count) else {
+            throw FileTransferError.invalidResponse("缩略图拉取范围无效")
+        }
+        let endOffset = min(Int64(data.count), startOffset + length)
+        return data.subdata(in: Int(startOffset)..<Int(endOffset))
     }
 
     func downloadUnique(

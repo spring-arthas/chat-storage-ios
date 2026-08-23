@@ -552,6 +552,21 @@ final class DriveViewModelTests: XCTestCase {
         XCTAssertEqual(third, Data("third".utf8))
     }
 
+    func testVideoThumbnailRangePrefetchUsesHeadAndTailWithoutWholeFileDownload() {
+        let fileSize: Int64 = 5 * 1024 * 1024 * 1024
+        let chunk: Int64 = 4 * 1024 * 1024
+
+        let ranges = DriveVideoThumbnailResourceLoader.prefetchRanges(
+            fileSize: fileSize,
+            maximumRangeBytes: chunk
+        )
+
+        XCTAssertEqual(ranges, [
+            .init(offset: 0, length: chunk),
+            .init(offset: fileSize - chunk, length: chunk),
+        ])
+    }
+
     func testLoadMergesCurrentDirectoryChildrenAndFirstFilePage() async {
         let repository = DriveRepositorySpy(
             roots: [.root(children: [.directory(id: 2, parentId: 1, name: "照片")])],

@@ -34,7 +34,7 @@ struct URLSessionMediaHTTPClient: MediaHTTPClient, Sendable {
 
     init(session: URLSession) { self.session = session }
 
-    // [修改] URLSession 默认不信任本地 CA，媒体接口必须复用 Socket 的严格证书校验。
+    // The media gateway is the server's plain HTTP Range endpoint.
     init() {
         let configuration = Self.makeConfiguration()
         self.session = URLSession(
@@ -44,12 +44,13 @@ struct URLSessionMediaHTTPClient: MediaHTTPClient, Sendable {
         )
     }
 
-    // [修改] 媒体 HTTPS 明确锁定 TLS 1.2 以上，和控制/上传/下载 Socket 保持一致。
+    // Keep the media request timeouts independent from the file-transfer
+    // sockets. The endpoint must return a small playback descriptor quickly;
+    // AVPlayer handles the subsequent Range requests.
     static func makeConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 30
-        configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
         return configuration
     }
 
@@ -60,7 +61,9 @@ struct URLSessionMediaHTTPClient: MediaHTTPClient, Sendable {
     }
 }
 
-// [修改] AVPlayer 和 AVAssetImageGenerator 不走 URLSessionDelegate，单独给 AVAsset 接入同一严格 CA 校验。
+// AVPlayer and AVAssetImageGenerator use this wrapper so the resource loader
+// delegate remains alive for the lifetime of the remote asset. The media
+// gateway is HTTP, so no TLS challenge handling is needed in normal playback.
 final class PinnedMediaAsset: @unchecked Sendable {
     let asset: AVURLAsset
     let resourceLoaderDelegate: PinnedMediaResourceLoaderDelegate
@@ -84,7 +87,8 @@ final class PinnedMediaAsset: @unchecked Sendable {
     }
 }
 
-// [修改] 只处理服务端证书挑战；主机必须等于播放 URL 主机，并复用应用内置 CA 的严格信任链。
+// Retained for deployments that expose a TLS media gateway; HTTP playback
+// simply never invokes this challenge callback.
 final class PinnedMediaResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
     let expectedHost: String
 
@@ -114,7 +118,7 @@ final class PinnedMediaResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDe
     }
 }
 
-// [修改] 仅处理服务端证书挑战，其他鉴权类型继续交给系统默认流程。
+// Retained for deployments that expose a TLS media gateway.
 private final class PinnedMediaSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
     func urlSession(
         _ session: URLSession,
@@ -176,7 +180,7 @@ actor RemoteMediaRepository: MediaPlaybackProviding {
         guard fileId > 0, !transferToken.isEmpty else {
             throw MediaRepositoryError.invalidRequest
         }
-        guard let requestURL = playbackRequestURL(fileId: fileId) else {
+        guard let requestURL = playbackRequestURL(fileId: fileId, username: username) else {
             throw MediaRepositoryError.invalidRequest
         }
         var request = URLRequest(url: requestURL)
@@ -187,44 +191,69 @@ actor RemoteMediaRepository: MediaPlaybackProviding {
             throw MediaRepositoryError.server("媒体服务返回 HTTP \(response.statusCode)")
         }
         let envelope: MediaEnvelope
-        do { envelope = try ProtocolJSON.decoder().decode(MediaEnvelope.self, from: data) }
-        catch { throw MediaRepositoryError.invalidResponse }
-        guard envelope.code == 200, let value = envelope.data else {
-            throw MediaRepositoryError.server(envelope.message)
-        }
-        guard value.playable != false else { throw MediaRepositoryError.notPlayable }
-        guard let rawURL = URL(string: value.playUrl), let normalized = normalize(rawURL) else {
+        do {
+            envelope = try ProtocolJSON.decoder().decode(MediaEnvelope.self, from: data)
+        } catch {
+            print("[Media] play-url JSON decode failed: \(error); body=\(Self.redactedBody(data))")
             throw MediaRepositoryError.invalidResponse
         }
+        guard envelope.code == 200 else {
+            throw MediaRepositoryError.server(envelope.message)
+        }
+        guard let value = envelope.data else {
+            print("[Media] play-url response has no data: body=\(Self.redactedBody(data))")
+            throw MediaRepositoryError.invalidResponse
+        }
+        if value.playable == false {
+            let message = envelope.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !message.isEmpty, message.caseInsensitiveCompare("ok") != .orderedSame {
+                throw MediaRepositoryError.server(message)
+            }
+            throw MediaRepositoryError.notPlayable
+        }
+        guard let playUrl = value.playUrl,
+              let rawURL = URL(string: playUrl),
+              let normalized = normalize(rawURL) else {
+            print("[Media] play-url response has invalid playUrl: \(value.playUrl ?? "nil"); body=\(Self.redactedBody(data))")
+            throw MediaRepositoryError.invalidResponse
+        }
+        // [修改] 输出服务端广告地址与最终播放地址，便于真机判断连不上的是哪一段。
+        print("[Media] play-url resolved: raw=\(value.playUrl ?? "nil") -> stream=\(normalized.absoluteString)")
         return MediaPlayback(
-            fileId: value.fileId,
+            fileId: value.fileId ?? fileId,
             playURL: normalized,
             fileSize: value.fileSize,
             mimeType: value.mimeType ?? "",
-            expiresInSeconds: value.expiresIn
+            // Older servers omit the expiry field even though the URL is
+            // usable. Keep the URL playable and refresh it conservatively.
+            expiresInSeconds: max(value.expiresIn ?? 300, 1)
         )
     }
 
-    private func playbackRequestURL(fileId: Int64) -> URL? {
+    private func playbackRequestURL(fileId: Int64, username: String) -> URL? {
         var components = URLComponents()
         components.scheme = TransportSecurity.mediaScheme
         components.host = normalizedConfiguredHost
         components.port = configuration.mediaPort
         components.path = "/media/play-url/\(fileId)"
+        // Keep the request contract aligned with the macOS and Android
+        // clients. The media gateway uses this identity when creating the
+        // short-lived stream session; the bearer token remains for servers
+        // that additionally enforce transfer-token authentication.
+        components.queryItems = [URLQueryItem(name: "userName", value: username)]
         return components.url
     }
 
     private func normalize(_ url: URL) -> URL? {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
-        // [修改] 服务端不得把 HTTPS 播放链路降级为明文 HTTP。
+        // Only accept the scheme exposed by the configured media gateway.
         guard components.scheme?.lowercased() == TransportSecurity.mediaScheme else { return nil }
-        guard let responseHost = components.host?.lowercased() else { return nil }
-        let configuredHost = normalizedConfiguredHost.lowercased()
-        if ["localhost", "127.0.0.1", "::1"].contains(responseHost) {
+        guard components.host != nil else { return nil }
+        // [修改] 真机统一使用当前配置主机：/media/play-url 请求本身就走配置主机，媒体流
+        // 也必须与之一致。服务端在多网卡 / VPN 环境常把 play-url 广告成自己可达的内网或
+        // VPN 地址，手机无法到达，必须替换回配置主机。
+        if components.host?.lowercased() != normalizedConfiguredHost.lowercased() {
             components.host = normalizedConfiguredHost
-        } else if responseHost != configuredHost {
-            // [修改] 播放流只能回到当前服务器，拒绝服务端把 AVPlayer 重定向到外部主机。
-            return nil
         }
         guard components.port == nil || components.port == configuration.mediaPort else { return nil }
         if components.port == nil { components.port = configuration.mediaPort }
@@ -233,6 +262,16 @@ actor RemoteMediaRepository: MediaPlaybackProviding {
 
     private var normalizedConfiguredHost: String {
         configuration.host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+    }
+
+    private static func redactedBody(_ data: Data) -> String {
+        let body = String(decoding: data, as: UTF8.self)
+        guard body.count <= 2_000 else { return String(body.prefix(2_000)) + "..." }
+        return body.replacingOccurrences(
+            of: #"([?&](?:token|access_token|signature)=)[^&#\"}]+"#,
+            with: "$1<redacted>",
+            options: .regularExpression
+        )
     }
 }
 
@@ -245,19 +284,94 @@ private struct MediaEnvelope: Decodable {
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        code = try values.decode(Int.self, forKey: .code)
-        message = try values.decodeIfPresent(String.self, forKey: .message)
-            ?? values.decodeIfPresent(String.self, forKey: .msg)
+        if let numericCode = try? values.decode(Int.self, forKey: .code) {
+            code = numericCode
+        } else if let stringCode = try? values.decode(String.self, forKey: .code),
+                  let numericCode = Int(stringCode) {
+            code = numericCode
+        } else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .code,
+                in: values,
+                debugDescription: "Media response code is missing or invalid"
+            )
+        }
+        message = (try? values.decodeIfPresent(String.self, forKey: .message))
+            ?? (try? values.decodeIfPresent(String.self, forKey: .msg))
             ?? ""
         data = try values.decodeIfPresent(MediaValue.self, forKey: .data)
     }
 }
 
 private struct MediaValue: Decodable {
-    let playUrl: String
-    let fileId: Int64
+    let playUrl: String?
+    let fileId: Int64?
     let fileSize: Int64?
     let mimeType: String?
-    let expiresIn: Int64
+    let expiresIn: Int64?
     let playable: Bool?
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: MediaCodingKey.self)
+        playUrl = try values.firstString(["playUrl", "playURL", "url"])
+        fileId = values.firstLossyInt64(["fileId", "fileID", "id"])
+        fileSize = values.firstLossyInt64(["fileSize", "size"])
+        mimeType = try values.firstString(["mimeType", "contentType"])
+        expiresIn = values.firstLossyInt64(["expiresIn", "expiresInSeconds"])
+        playable = values.firstLossyBool(["playable", "isPlayable"])
+    }
+}
+
+private struct MediaCodingKey: CodingKey, Hashable {
+    let stringValue: String
+    let intValue: Int? = nil
+
+    init(_ stringValue: String) { self.stringValue = stringValue }
+    init?(stringValue: String) { self.init(stringValue) }
+    init?(intValue: Int) { nil }
+}
+
+private extension KeyedDecodingContainer where Key == MediaCodingKey {
+    func firstString(_ names: [String]) throws -> String? {
+        for name in names {
+            let key = MediaCodingKey(name)
+            guard contains(key) else { continue }
+            if let value = try decodeIfPresent(String.self, forKey: key) {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+        }
+        return nil
+    }
+
+    func firstLossyInt64(_ names: [String]) -> Int64? {
+        for name in names {
+            let key = MediaCodingKey(name)
+            guard contains(key) else { continue }
+            if let value = try? decodeIfPresent(Int64.self, forKey: key) { return value }
+            if let value = try? decodeIfPresent(Int.self, forKey: key) { return Int64(value) }
+            if let value = try? decodeIfPresent(String.self, forKey: key),
+               let parsed = Int64(value.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return parsed
+            }
+        }
+        return nil
+    }
+
+    func firstLossyBool(_ names: [String]) -> Bool? {
+        for name in names {
+            let key = MediaCodingKey(name)
+            guard contains(key) else { continue }
+            if let value = try? decodeIfPresent(Bool.self, forKey: key) { return value }
+            if let value = try? decodeIfPresent(Int.self, forKey: key) { return value != 0 }
+            if let value = try? decodeIfPresent(String.self, forKey: key) {
+                switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                case "true", "yes", "y", "1": return true
+                case "false", "no", "n", "0": return false
+                default: continue
+                }
+            }
+        }
+        return nil
+    }
 }

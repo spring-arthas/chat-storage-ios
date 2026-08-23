@@ -4,7 +4,11 @@ import Network
 import Security
 
 enum TransportSecurity {
-    static let mediaScheme = "https"
+    // The media service on port 10188 is the plain HTTP Range gateway used by
+    // the macOS client and server. TLS is reserved for any future media
+    // endpoint; forcing HTTPS here makes a real-device connection hang during
+    // the handshake before AVPlayer can issue its first Range request.
+    static let mediaScheme = "http"
     private static let certificateName = "chat-storage-local-ca"
     private static let verificationQueue = DispatchQueue(label: "com.alibaba.chatstorage.tls-verification")
     private static let rootCertificateData: Data? = {
@@ -62,7 +66,10 @@ enum ServerConfigurationError: Error, Equatable, Sendable {
 }
 
 struct ServerConfiguration: Codable, Equatable, Sendable {
-    static let defaultHost = "172.21.32.64"
+    // 「服务器设置」页面的预填占位（非 IP、不会命中任何真实服务器）。代码里不写死任何
+    // IP：登录、上传、下载、媒体、视频播放等所有与服务端的交互，一律使用用户在
+    // 该设置页配置的 host（见 MediaRepository.normalize 与各传输/控制组件）。
+    static let defaultHost = "server.example.com"
     static let defaultControlPort = 10_086
     static let defaultUploadPort = 10_087
     static let defaultDownloadPort = 10_088

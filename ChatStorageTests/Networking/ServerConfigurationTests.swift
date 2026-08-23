@@ -63,9 +63,9 @@ final class ServerConfigurationTests: XCTestCase {
         )
     }
 
-    // 自定义帧端口改为普通 TCP 后，媒体资源仍必须通过 HTTPS 获取。
-    func testMediaTransportRemainsHTTPS() {
-        XCTAssertEqual(TransportSecurity.mediaScheme, "https")
+    // The configured media port is the server's plain HTTP Range gateway.
+    func testMediaTransportUsesHTTPRangeGateway() {
+        XCTAssertEqual(TransportSecurity.mediaScheme, "http")
     }
 
     // [修改] App 必须携带与 net-server 内嵌 TLS 证书配套的严格 CA，不能依赖设备手工安装证书。

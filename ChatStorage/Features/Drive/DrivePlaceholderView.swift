@@ -131,6 +131,7 @@ final class DriveVideoPlaybackController {
     @ObservationIgnored private let refreshPlayback: (@MainActor () async throws -> MediaPlayback)?
     @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private var currentURL: URL
+    @ObservationIgnored private var needsInitialRefresh = false
     @ObservationIgnored private var expiresAt: Date?
     @ObservationIgnored private var refreshLeadTime: TimeInterval = 0
     @ObservationIgnored private var engine: (any DriveVideoPlayerEngine)?
@@ -168,9 +169,26 @@ final class DriveVideoPlaybackController {
         applyExpiry(playback.expiresInSeconds)
     }
 
+    init(
+        refreshPlayback: @escaping @MainActor () async throws -> MediaPlayback,
+        engineFactory: any DriveVideoPlayerEngineFactory = PinnedDriveVideoPlayerEngineFactory(),
+        now: @escaping () -> Date = Date.init
+    ) {
+        // The actual URL is supplied by the first playback-address request.
+        currentURL = URL(string: "https://127.0.0.1/")!
+        self.engineFactory = engineFactory
+        self.refreshPlayback = refreshPlayback
+        self.now = now
+        needsInitialRefresh = true
+    }
+
     func start(autoplay: Bool) async {
         guard engine == nil else { return }
         let command = commandGeneration
+        if needsInitialRefresh {
+            await refreshSource(resumesPlayback: autoplay, expectedCommandGeneration: command)
+            return
+        }
         if refreshPlayback != nil,
            let expiresAt,
            now().addingTimeInterval(refreshLeadTime) >= expiresAt {
@@ -344,6 +362,7 @@ final class DriveVideoPlaybackController {
                 return
             }
             currentURL = playback.playURL
+            needsInitialRefresh = false
             applyExpiry(playback.expiresInSeconds)
             await installEngine(
                 url: playback.playURL,
@@ -430,7 +449,9 @@ final class DriveVideoPlaybackController {
             engine = nil
             player = nil
             playbackState.pause()
-            phase = .failed(error.localizedDescription.isEmpty ? "视频加载失败" : error.localizedDescription)
+            // [修改] 连不上时把目标流地址带出来，便于真机判断连的是哪种主机。
+            let base = error.localizedDescription.isEmpty ? "视频加载失败" : error.localizedDescription
+            phase = .failed("\(base)\n\(url.absoluteString)")
         }
     }
 
@@ -1337,17 +1358,16 @@ struct DrivePlaceholderView: View {
     }
 
     private func showPreview(for entry: DriveFileEntry) async {
-        if isVideo(entry), let mediaRepository,
-           let playback = try? await mediaRepository.playback(fileId: entry.id, username: username) {
-            // [修改] 远程视频保留过期时间和续签入口，失败或到期后可恢复原进度继续播放。
+        if isVideo(entry), let mediaRepository {
+            let requestPlayback: @MainActor () async throws -> MediaPlayback = {
+                try await mediaRepository.playback(fileId: entry.id, username: username)
+            }
+            // [修改] 先展示播放器，再由播放器异步申请 Range 播放地址；大视频不再等待请求完成或回退整文件下载。
             preview = DrivePreview(
                 entry: entry,
-                url: playback.playURL,
+                url: Self.pendingVideoURL,
                 kind: .video,
-                playback: playback,
-                refreshPlayback: {
-                    try await mediaRepository.playback(fileId: entry.id, username: username)
-                },
+                refreshPlayback: requestPlayback,
                 localShareProvider: {
                     await makeSharePayload(for: entry)
                 }
@@ -1357,6 +1377,8 @@ struct DrivePlaceholderView: View {
         guard let url = await model.preview(entry) else { return }
         preview = DrivePreview(entry: entry, url: url, kind: isVideo(entry) ? .video : .image)
     }
+
+    private static let pendingVideoURL = URL(string: "https://127.0.0.1/pending-video")!
 
     private func downloadAndShare(_ entry: DriveFileEntry) async {
         if let payload = await makeSharePayload(for: entry) { sharePayload = payload }
@@ -1709,6 +1731,11 @@ private struct DrivePreviewView: View {
                 playback: playback,
                 refreshPlayback: refreshPlayback
             ))
+        } else if preview.kind == .video,
+                  let refreshPlayback = preview.refreshPlayback {
+            _videoController = State(initialValue: DriveVideoPlaybackController(
+                refreshPlayback: refreshPlayback
+            ))
         } else {
             _videoController = State(initialValue: DriveVideoPlaybackController(url: preview.url))
         }
@@ -1721,8 +1748,9 @@ private struct DrivePreviewView: View {
                 case .video:
                     if let player = videoController.player {
                         videoContent(player: player, fullscreen: false)
+                    } else {
+                        pendingVideoContent
                     }
-                    else { ProgressView("加载视频") }
                 case .image:
                     imageContent
                 case .downloaded:
@@ -1791,6 +1819,14 @@ private struct DrivePreviewView: View {
         }
         .background(Color.black)
         .overlay { videoStatusOverlay }
+    }
+
+    private var pendingVideoContent: some View {
+        Color.black
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .overlay { videoStatusOverlay }
+            .accessibilityIdentifier("drive.video.loading-surface")
     }
 
     private func videoControls(player: AVPlayer, fullscreen: Bool) -> some View {
@@ -2300,10 +2336,11 @@ actor DriveThumbnailLoader {
                         maxPixelSize: 360
                     )
                 case .video:
-                    guard let mediaRepository else { return nil }
+                    guard mediaRepository != nil || transferManager != nil else { return nil }
                     return try await Self.videoThumbnailData(
                         entry: entry,
                         mediaRepository: mediaRepository,
+                        transferManager: transferManager,
                         username: username
                     )
                 }
@@ -2318,20 +2355,56 @@ actor DriveThumbnailLoader {
 
     private static func videoThumbnailData(
         entry: DriveFileEntry,
-        mediaRepository: any MediaPlaybackProviding,
+        mediaRepository: (any MediaPlaybackProviding)?,
+        transferManager: (any DriveTransferManaging)?,
         username: String
     ) async throws -> Data? {
-        let playback = try await mediaRepository.playback(fileId: entry.id, username: username)
-        // [修改] 视频缩略图读取和播放器共用严格 CA；局部包装对象保留到生成结束。
-        guard let pinnedMediaAsset = PinnedMediaAsset(url: playback.playURL) else { return nil }
-        defer { _ = pinnedMediaAsset }
-        let generator = AVAssetImageGenerator(asset: pinnedMediaAsset.asset)
+        if let mediaRepository,
+           let playback = try? await mediaRepository.playback(fileId: entry.id, username: username),
+           let pinnedMediaAsset = PinnedMediaAsset(url: playback.playURL),
+           let data = try? await generateVideoThumbnail(asset: pinnedMediaAsset.asset) {
+            withExtendedLifetime(pinnedMediaAsset) {}
+            return data
+        }
+
+        guard let transferManager,
+              let fileSize = entry.size,
+              fileSize > 0,
+              let assetURL = URL(string: "chatstorage-thumbnail://video/\(entry.id)") else {
+            return nil
+        }
+        let asset = AVURLAsset(url: assetURL)
+        let loader = DriveVideoThumbnailResourceLoader(
+            fileId: entry.id,
+            fileSize: fileSize,
+            fileName: entry.name,
+            fetchRange: { offset, length in
+                try await transferManager.thumbnailRangeData(
+                    remoteFileId: entry.id,
+                    fileName: entry.name,
+                    fileSize: fileSize,
+                    startOffset: offset,
+                    length: length
+                )
+            }
+        )
+        let loaderQueue = DispatchQueue(label: "com.alibaba.chatstorage.video-thumbnail.\(entry.id)")
+        asset.resourceLoader.setDelegate(loader, queue: loaderQueue)
+        let data = try await generateVideoThumbnail(asset: asset)
+        withExtendedLifetime(loader) {}
+        return data
+    }
+
+    private static func generateVideoThumbnail(asset: AVAsset) async throws -> Data? {
+        let generator = AVAssetImageGenerator(asset: asset)
         let generatorBox = DriveThumbnailImageGeneratorBox(generator)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 360, height: 360)
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 2, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 2, preferredTimescale: 600)
 
         return try await withTaskCancellationHandler {
-            for second in [1.0, 0.0] {
+            for second in [0.0, 1.0, 2.0] {
                 try Task.checkCancellation()
                 do {
                     let result = try await generator.image(at: CMTime(seconds: second, preferredTimescale: 600))
@@ -2346,6 +2419,194 @@ actor DriveThumbnailLoader {
             return nil
         } onCancel: {
             generatorBox.value.cancelAllCGImageGeneration()
+        }
+    }
+}
+
+// HTTP 媒体地址不可用时，直接把 AVFoundation 的字节请求桥接到现有
+// range_pull v2。单窗口限制为 4MB，并预取头尾以兼容 moov 位于文件尾部的视频。
+final class DriveVideoThumbnailResourceLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
+    struct ByteRange: Equatable, Sendable {
+        let offset: Int64
+        let length: Int64
+    }
+
+    private struct CachedSegment {
+        let offset: Int64
+        let data: Data
+        var endOffset: Int64 { offset + Int64(data.count) }
+    }
+
+    private final class LoadingRequestBox: @unchecked Sendable {
+        let value: AVAssetResourceLoadingRequest
+        init(_ value: AVAssetResourceLoadingRequest) { self.value = value }
+    }
+
+    private let fileId: Int64
+    private let fileSize: Int64
+    private let fileName: String
+    private let fetchRange: @Sendable (Int64, Int64) async throws -> Data
+    private let lock = NSLock()
+    private var cachedSegments: [CachedSegment] = []
+    private var activeTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
+    private var prefetchTask: Task<Void, Never>?
+    private static let maximumRangeBytes: Int64 = 4 * 1024 * 1024
+
+    init(
+        fileId: Int64,
+        fileSize: Int64,
+        fileName: String,
+        fetchRange: @escaping @Sendable (Int64, Int64) async throws -> Data
+    ) {
+        self.fileId = fileId
+        self.fileSize = fileSize
+        self.fileName = fileName
+        self.fetchRange = fetchRange
+    }
+
+    deinit {
+        tasksAndClear().forEach { $0.cancel() }
+    }
+
+    static func prefetchRanges(fileSize: Int64, maximumRangeBytes: Int64 = maximumRangeBytes) -> [ByteRange] {
+        guard fileSize > 0, maximumRangeBytes > 0 else { return [] }
+        let length = min(fileSize, maximumRangeBytes)
+        let head = ByteRange(offset: 0, length: length)
+        guard fileSize > length else { return [head] }
+        return [head, ByteRange(offset: fileSize - length, length: length)]
+    }
+
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
+    ) -> Bool {
+        if let info = loadingRequest.contentInformationRequest {
+            info.contentLength = fileSize
+            info.isByteRangeAccessSupported = true
+            info.contentType = contentType
+            if loadingRequest.dataRequest == nil {
+                loadingRequest.finishLoading()
+                return true
+            }
+        }
+        guard let dataRequest = loadingRequest.dataRequest else { return false }
+        let offset = max(0, dataRequest.requestedOffset)
+        let available = max(0, fileSize - offset)
+        let requestedLength = dataRequest.requestsAllDataToEndOfResource
+            ? min(Self.maximumRangeBytes, available)
+            : min(Int64(dataRequest.requestedLength), Self.maximumRangeBytes, available)
+        guard requestedLength > 0 else {
+            loadingRequest.finishLoading()
+            return true
+        }
+
+        let key = ObjectIdentifier(loadingRequest)
+        let box = LoadingRequestBox(loadingRequest)
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await ensureHeadAndTailPrefetched()
+            do {
+                try Task.checkCancellation()
+                let data: Data
+                if let cached = cachedData(offset: offset, length: requestedLength) {
+                    data = cached
+                } else {
+                    data = try await fetchAndCache(offset: offset, length: requestedLength)
+                }
+                try Task.checkCancellation()
+                box.value.dataRequest?.respond(with: data)
+                box.value.finishLoading()
+            } catch is CancellationError {
+                // AVFoundation 已取消请求时不再回调 finishLoading。
+            } catch {
+                box.value.finishLoading(with: error)
+            }
+            removeTask(for: key)
+        }
+        store(task: task, for: key)
+        return true
+    }
+
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        didCancel loadingRequest: AVAssetResourceLoadingRequest
+    ) {
+        takeTask(for: ObjectIdentifier(loadingRequest))?.cancel()
+    }
+
+    private func ensureHeadAndTailPrefetched() async {
+        let task = existingOrCreatePrefetchTask()
+        await task.value
+    }
+
+    private func existingOrCreatePrefetchTask() -> Task<Void, Never> {
+        lock.lock()
+        defer { lock.unlock() }
+        if let prefetchTask { return prefetchTask }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            for range in Self.prefetchRanges(fileSize: fileSize) {
+                if cachedData(offset: range.offset, length: range.length) != nil { continue }
+                _ = try? await fetchAndCache(offset: range.offset, length: range.length)
+            }
+        }
+        prefetchTask = task
+        return task
+    }
+
+    private func fetchAndCache(offset: Int64, length: Int64) async throws -> Data {
+        let data = try await fetchRange(offset, length)
+        guard !data.isEmpty else { throw FileTransferError.incompleteTransfer(expected: length, actual: 0) }
+        cache(data, offset: offset)
+        return data
+    }
+
+    private func cache(_ data: Data, offset: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        if !cachedSegments.contains(where: { $0.offset == offset && $0.data.count == data.count }) {
+            cachedSegments.append(CachedSegment(offset: offset, data: data))
+            if cachedSegments.count > 8 { cachedSegments.removeFirst(cachedSegments.count - 8) }
+        }
+    }
+
+    private func cachedData(offset: Int64, length: Int64) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let segment = cachedSegments.first(where: {
+            offset >= $0.offset && offset + length <= $0.endOffset
+        }) else { return nil }
+        let start = Int(offset - segment.offset)
+        return segment.data.subdata(in: start..<(start + Int(length)))
+    }
+
+    private func store(task: Task<Void, Never>, for key: ObjectIdentifier) {
+        lock.lock(); activeTasks[key] = task; lock.unlock()
+    }
+
+    private func takeTask(for key: ObjectIdentifier) -> Task<Void, Never>? {
+        lock.lock(); defer { lock.unlock() }
+        return activeTasks.removeValue(forKey: key)
+    }
+
+    private func removeTask(for key: ObjectIdentifier) {
+        _ = takeTask(for: key)
+    }
+
+    private func tasksAndClear() -> [Task<Void, Never>] {
+        lock.lock(); defer { lock.unlock() }
+        let tasks = Array(activeTasks.values) + [prefetchTask].compactMap { $0 }
+        activeTasks.removeAll()
+        prefetchTask = nil
+        return tasks
+    }
+
+    private var contentType: String {
+        switch (fileName as NSString).pathExtension.lowercased() {
+        case "mov": return "com.apple.quicktime-movie"
+        case "avi": return "public.avi"
+        case "mkv": return "org.matroska.mkv"
+        default: return "public.mpeg-4"
         }
     }
 }

@@ -385,6 +385,35 @@ actor TransferManager {
         return result.data
     }
 
+    // 视频缩略图由 AVFoundation 按需读取文件头、尾部 moov 和首帧字节，
+    // 每次只映射为一个有限 range_pull 窗口，绝不回退为整文件下载。
+    func thumbnailRangeData(
+        remoteFileId: Int64,
+        fileName: String,
+        fileSize: Int64,
+        startOffset: Int64,
+        length: Int64
+    ) async throws -> Data {
+        guard remoteFileId > 0 else { throw FileTransferError.invalidFileId }
+        guard startOffset >= 0, length > 0 else {
+            throw FileTransferError.invalidResponse("缩略图拉取范围无效")
+        }
+        let available = fileSize > 0 ? max(0, fileSize - startOffset) : length
+        let requestedLength = min(length, available)
+        guard requestedLength > 0 else { return Data() }
+        let result = try await rangePullEngine.pull(
+            command: RangePullCommand(
+                configuration: configuration,
+                identity: credentialStore.current(),
+                taskId: "video-thumbnail-\(UUID().uuidString)",
+                remoteFileId: remoteFileId,
+                startOffset: startOffset,
+                length: requestedLength
+            )
+        )
+        return result.data
+    }
+
     // [修改] 远端文件重命名或删除后清掉对应完整预览，并取消仍在进行的同文件预览任务。
     func removeCachedFile(remoteFileId: Int64) async {
         let keyPrefix = "\(configuration.storageScopeID):\(ownerUserId):\(remoteFileId):"

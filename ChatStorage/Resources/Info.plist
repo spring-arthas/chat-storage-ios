@@ -29,6 +29,15 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>用于连接你的 Chat Storage 私人服务器并同步消息与文件。</string>
+	<!-- The media service on port 10188 is the private server's HTTP Range
+	     gateway. The server host is user-configurable, so a fixed ATS domain
+	     exception cannot cover it. Other network paths still use their own
+	     authentication and transport checks. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<key>NSFaceIDUsageDescription</key>
 	<string>用于解锁 Chat Storage 和恢复已保存的登录会话。</string>
 	<key>UIApplicationSceneManifest</key>

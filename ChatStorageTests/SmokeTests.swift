@@ -20,11 +20,11 @@ final class SmokeTests: XCTestCase {
         }
     }
 
-    // [修改] TLS 迁移完成后不能保留任何明文本地网络例外，防止新 URL 意外降级。
-    func testInfoPlistDoesNotAllowInsecureNetworking() throws {
+    func testInfoPlistAllowsConfiguredPrivateHTTPMediaGateway() throws {
         // [修改] 真机没有 Mac 源码目录，直接检查当前已安装 App 展开后的 Info.plist。
         let infoDictionary = try XCTUnwrap(Bundle.main.infoDictionary)
-        XCTAssertNil(infoDictionary["NSAppTransportSecurity"])
+        let ats = try XCTUnwrap(infoDictionary["NSAppTransportSecurity"] as? [String: Any])
+        XCTAssertEqual(ats["NSAllowsArbitraryLoads"] as? Bool, true)
     }
 
     @MainActor

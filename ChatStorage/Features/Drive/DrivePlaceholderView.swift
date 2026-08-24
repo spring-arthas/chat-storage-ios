@@ -4,6 +4,7 @@ import CoreTransferable
 import Foundation
 import ImageIO
 import Observation
+import Photos
 import PhotosUI
 import QuickLook
 import SwiftUI
@@ -571,6 +572,9 @@ private final class AVPlayerDriveVideoEngine: DriveVideoPlayerEngine {
     private var timeControlObservation: NSKeyValueObservation?
     private var timeObserver: Any?
     private var notificationTokens: [NSObjectProtocol] = []
+    private var lastDiagnosticWallTime: TimeInterval?
+    private var lastDiagnosticMediaTime: TimeInterval?
+    private var didPublishTrackDiagnostics = false
 
     init(url: URL) throws {
         let player: AVPlayer
@@ -585,6 +589,7 @@ private final class AVPlayerDriveVideoEngine: DriveVideoPlayerEngine {
             player = asset.makePlayer()
         }
         self.player = player
+        print("[PlayerDiag] engine-created url=\(Self.redactedURL(url))")
         observe(player)
     }
 
@@ -594,11 +599,19 @@ private final class AVPlayerDriveVideoEngine: DriveVideoPlayerEngine {
         publishTimeControlStatus()
     }
 
-    func play() { player?.play() }
-    func pause() { player?.pause() }
+    func play() {
+        print("[PlayerDiag] command=play current=\(Self.seconds(player?.currentTime().seconds))")
+        player?.play()
+    }
+
+    func pause() {
+        print("[PlayerDiag] command=pause current=\(Self.seconds(player?.currentTime().seconds))")
+        player?.pause()
+    }
 
     func seek(to seconds: TimeInterval, tolerance: TimeInterval) async {
         guard let player else { return }
+        print("[PlayerDiag] command=seek target=\(Self.seconds(seconds)) tolerance=\(Self.seconds(tolerance))")
         let target = CMTime(seconds: max(seconds, 0), preferredTimescale: 600)
         let toleranceTime = CMTime(seconds: max(tolerance, 0), preferredTimescale: 600)
         await withCheckedContinuation { continuation in
@@ -609,6 +622,7 @@ private final class AVPlayerDriveVideoEngine: DriveVideoPlayerEngine {
     }
 
     func invalidate() {
+        print("[PlayerDiag] engine-invalidated current=\(Self.seconds(player?.currentTime().seconds))")
         itemStatusObservation = nil
         timeControlObservation = nil
         if let timeObserver, let player { player.removeTimeObserver(timeObserver) }
@@ -641,6 +655,27 @@ private final class AVPlayerDriveVideoEngine: DriveVideoPlayerEngine {
                     ?? "视频播放失败"
                 Task { @MainActor [weak self] in self?.eventHandler?(.failed(message)) }
             })
+            notificationTokens.append(NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemPlaybackStalled,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.publishPlaybackStalled() }
+            })
+            notificationTokens.append(NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemNewAccessLogEntry,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.publishAccessLog() }
+            })
+            notificationTokens.append(NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemNewErrorLogEntry,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.publishErrorLog() }
+            })
         }
         timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in self?.publishTimeControlStatus() }
@@ -651,6 +686,7 @@ private final class AVPlayerDriveVideoEngine: DriveVideoPlayerEngine {
         ) { [weak self] time in
             Task { @MainActor [weak self] in
                 guard let self, let player = self.player else { return }
+                self.publishPeriodicDiagnostics(time: time, player: player)
                 self.eventHandler?(.time(
                     currentTime: time.seconds,
                     duration: player.currentItem?.duration.seconds ?? 0,
@@ -662,9 +698,11 @@ private final class AVPlayerDriveVideoEngine: DriveVideoPlayerEngine {
 
     private func publishItemStatus() {
         guard let item = player?.currentItem else { return }
+        print("[PlayerDiag] item-status=\(Self.itemStatus(item.status)) duration=\(Self.seconds(item.duration.seconds)) error=\(item.error?.localizedDescription ?? "none")")
         switch item.status {
         case .readyToPlay:
             eventHandler?(.ready(duration: item.duration.seconds))
+            publishTrackDiagnosticsIfNeeded(item: item)
         case .failed:
             eventHandler?(.failed(item.error?.localizedDescription ?? "视频加载失败"))
         case .unknown:
@@ -676,9 +714,132 @@ private final class AVPlayerDriveVideoEngine: DriveVideoPlayerEngine {
 
     private func publishTimeControlStatus() {
         guard let player else { return }
+        let waitingReason = player.reasonForWaitingToPlay?.rawValue ?? "none"
+        print("[PlayerDiag] time-control=\(Self.timeControlStatus(player.timeControlStatus)) rate=\(Self.seconds(Double(player.rate))) waiting=\(waitingReason)")
         if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
             eventHandler?(.waiting)
         }
+    }
+
+    private func publishPeriodicDiagnostics(time: CMTime, player: AVPlayer) {
+        let wallTime = Date.timeIntervalSinceReferenceDate
+        let mediaTime = time.seconds
+        guard mediaTime.isFinite else { return }
+        guard let previousWall = lastDiagnosticWallTime,
+              let previousMedia = lastDiagnosticMediaTime else {
+            lastDiagnosticWallTime = wallTime
+            lastDiagnosticMediaTime = mediaTime
+            return
+        }
+        let wallDelta = wallTime - previousWall
+        guard wallDelta >= 1 else { return }
+        let effectiveRate = (mediaTime - previousMedia) / wallDelta
+        lastDiagnosticWallTime = wallTime
+        lastDiagnosticMediaTime = mediaTime
+        let item = player.currentItem
+        let bufferAhead = Self.bufferAhead(item: item, currentTime: mediaTime)
+        let accessEvent = item?.accessLog()?.events.last
+        print(
+            "[PlayerDiag] tick media=\(Self.seconds(mediaTime)) wallDelta=\(Self.seconds(wallDelta)) "
+                + "mediaDelta=\(Self.seconds(mediaTime - previousMedia)) effectiveRate=\(Self.seconds(effectiveRate)) "
+                + "playerRate=\(Self.seconds(Double(player.rate))) control=\(Self.timeControlStatus(player.timeControlStatus)) "
+                + "bufferAhead=\(Self.seconds(bufferAhead)) empty=\(item?.isPlaybackBufferEmpty ?? false) "
+                + "likely=\(item?.isPlaybackLikelyToKeepUp ?? false) droppedFrames=\(accessEvent?.numberOfDroppedVideoFrames ?? -1)"
+        )
+    }
+
+    private func publishTrackDiagnosticsIfNeeded(item: AVPlayerItem) {
+        guard !didPublishTrackDiagnostics else { return }
+        didPublishTrackDiagnostics = true
+        Task { @MainActor in
+            do {
+                let tracks = try await item.asset.loadTracks(withMediaType: .video)
+                guard let track = tracks.first else {
+                    print("[PlayerDiag] video-track=missing")
+                    return
+                }
+                // Swift 6 下 AVAssetTrack 不是 Sendable，同一轨道的属性顺序读取，避免跨任务并发访问。
+                let frameRate = try await track.load(.nominalFrameRate)
+                let frameDuration = try await track.load(.minFrameDuration)
+                let size = try await track.load(.naturalSize)
+                let bitRate = try await track.load(.estimatedDataRate)
+                let reordersFrames = try await track.load(.requiresFrameReordering)
+                print(
+                    "[PlayerDiag] video-track nominalFPS=\(Self.seconds(Double(frameRate))) "
+                        + "minFrameDuration=\(Self.seconds(frameDuration.seconds)) "
+                        + "size=\(Int(size.width))x\(Int(size.height)) "
+                        + "estimatedBitrate=\(Self.seconds(Double(bitRate))) frameReordering=\(reordersFrames)"
+                )
+            } catch {
+                print("[PlayerDiag] video-track-error=\(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func publishPlaybackStalled() {
+        guard let player else { return }
+        print("[PlayerDiag] playback-stalled current=\(Self.seconds(player.currentTime().seconds)) bufferAhead=\(Self.seconds(Self.bufferAhead(item: player.currentItem, currentTime: player.currentTime().seconds)))")
+    }
+
+    private func publishAccessLog() {
+        guard let event = player?.currentItem?.accessLog()?.events.last else { return }
+        print(
+            "[PlayerDiag] access requests=\(event.numberOfMediaRequests) stalls=\(event.numberOfStalls) "
+                + "bytes=\(event.numberOfBytesTransferred) transfer=\(Self.seconds(event.transferDuration)) "
+                + "indicatedBitrate=\(Self.seconds(event.indicatedBitrate)) observedBitrate=\(Self.seconds(event.observedBitrate)) "
+                + "droppedFrames=\(event.numberOfDroppedVideoFrames) overdue=\(event.downloadOverdue)"
+        )
+    }
+
+    private func publishErrorLog() {
+        guard let event = player?.currentItem?.errorLog()?.events.last else { return }
+        print("[PlayerDiag] error-log domain=\(event.errorDomain) status=\(event.errorStatusCode) comment=\(event.errorComment ?? "none")")
+    }
+
+    private static func bufferAhead(item: AVPlayerItem?, currentTime: TimeInterval) -> TimeInterval {
+        guard currentTime.isFinite, let item else { return 0 }
+        return item.loadedTimeRanges
+            .map(\.timeRangeValue)
+            .filter { $0.start.seconds <= currentTime + 0.1 && $0.end.seconds >= currentTime }
+            .map { max(0, $0.end.seconds - currentTime) }
+            .max() ?? 0
+    }
+
+    private static func timeControlStatus(_ status: AVPlayer.TimeControlStatus) -> String {
+        switch status {
+        case .paused: "paused"
+        case .waitingToPlayAtSpecifiedRate: "waiting"
+        case .playing: "playing"
+        @unknown default: "unknown"
+        }
+    }
+
+    private static func itemStatus(_ status: AVPlayerItem.Status) -> String {
+        switch status {
+        case .unknown: "unknown"
+        case .readyToPlay: "ready"
+        case .failed: "failed"
+        @unknown default: "unknown"
+        }
+    }
+
+    private static func seconds(_ value: TimeInterval?) -> String {
+        guard let value, value.isFinite else { return "nan" }
+        return String(format: "%.3f", value)
+    }
+
+    private static func redactedURL(_ url: URL) -> String {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return "<invalid-url>"
+        }
+        let originalQueryItems = components.queryItems
+        components.queryItems = originalQueryItems?.map { item in
+            switch item.name.lowercased() {
+            case "token", "access_token", "signature": URLQueryItem(name: item.name, value: "<redacted>")
+            default: item
+            }
+        }
+        return components.string ?? "<invalid-url>"
     }
 }
 
@@ -871,7 +1032,19 @@ struct DrivePlaceholderView: View {
                 onDismiss: { addPresentation.sourcePickerDidDismiss() }
             ) {
                 DriveAddSourcePicker { destination in
-                    addPresentation.select(destination)
+                    guard destination == .photos else {
+                        addPresentation.select(destination)
+                        return
+                    }
+                    // 零副本视频依赖 Photos 本地资源标识，必须在展示选择器前获得读取授权；
+                    // 授权后的 shared library picker 才会向 itemIdentifier 暴露该标识。
+                    Task {
+                        guard await DrivePhotoLibraryAccess.requestReadAccessIfNeeded() else {
+                            model.reportError("需要相册访问权限才能直接上传本地视频")
+                            return
+                        }
+                        addPresentation.select(.photos)
+                    }
                 }
             }
             .fileImporter(
@@ -883,7 +1056,8 @@ struct DrivePlaceholderView: View {
             .photosPicker(
                 isPresented: addDestinationBinding(.photos),
                 selection: $selectedPhotos,
-                matching: PHPickerFilter.any(of: [.images, .videos])
+                matching: PHPickerFilter.any(of: [.images, .videos]),
+                photoLibrary: .shared()
             )
             .onChange(of: selectedPhotos) { _, items in
                 guard !items.isEmpty else { return }
@@ -1499,41 +1673,62 @@ struct DrivePlaceholderView: View {
         await model.upload(sourceURLs: urls)
     }
 
-    // [修改] 相册选中的照片/视频先落成应用暂存文件，再进入与文件上传相同的队列。
+    // 本地相册视频直接由 Photos 分块供给传输引擎；照片仍使用既有暂存路径，避免扩大本次改动范围。
     private func importPickedMedia(_ items: [PhotosPickerItem]) async {
-        var urls: [URL] = []
-        var failedCount = 0
         for (index, item) in items.enumerated() {
             let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
+            let contentType = item.supportedContentTypes.first {
+                isVideo ? $0.conforms(to: .movie) : $0.conforms(to: .image)
+            }
+            let fileExtension = contentType?.preferredFilenameExtension ?? (isVideo ? "mov" : "jpg")
+            let fileName = isVideo ? "视频 \(index + 1).\(fileExtension)" : "照片 \(index + 1).\(fileExtension)"
             if isVideo {
-                if let video = try? await item.loadTransferable(type: DrivePickedVideoFile.self) {
-                    let ext = video.url.pathExtension.isEmpty ? "mov" : video.url.pathExtension
-                    if let renamed = try? await ChatAttachmentStaging.renameTransferredFile(
-                        video.url, preferredFileName: "视频 \(index + 1).\(ext)"
-                    ) {
-                        urls.append(renamed)
-                        continue
-                    }
-                }
-            } else if let image = try? await item.loadTransferable(type: DrivePickedImageFile.self) {
-                let ext = image.url.pathExtension.isEmpty ? "jpg" : image.url.pathExtension
-                if let renamed = try? await ChatAttachmentStaging.renameTransferredFile(
-                    image.url, preferredFileName: "照片 \(index + 1).\(ext)"
-                ) {
-                    urls.append(renamed)
+                guard let assetIdentifier = item.itemIdentifier else {
+                    model.reportError("无法定位所选相册视频，请重新选择")
                     continue
                 }
+                guard await DrivePhotoLibraryAccess.requestReadAccessIfNeeded() else {
+                    model.reportError("需要相册访问权限才能直接上传本地视频")
+                    continue
+                }
+                guard let preparation = await model.beginPhotoLibraryUpload(
+                    fileName: fileName,
+                    photoLibraryAssetIdentifier: assetIdentifier
+                ) else { return }
+                await model.startPhotoLibraryVideoUpload(preparation)
+                continue
             }
-            failedCount += 1
+
+            guard let preparation = await model.beginPhotoLibraryUpload(fileName: fileName) else { return }
+            do {
+                guard let stagedURL = try await stagedPickedMedia(
+                    item,
+                    index: index,
+                    isVideo: isVideo
+                ) else {
+                    throw FileTransferError.invalidResponse("没有读取到可上传的相册内容")
+                }
+                await model.finishPhotoLibraryUpload(preparation, sourceURL: stagedURL)
+            } catch {
+                let message = (error as? LocalizedError)?.errorDescription ?? "相册文件导入失败"
+                await model.failPhotoLibraryUpload(preparation, message: message)
+                model.reportError(message)
+            }
         }
-        guard !urls.isEmpty else {
-            model.reportError("没有读取到可上传的相册内容")
-            return
-        }
-        await model.upload(sourceURLs: urls)
-        if failedCount > 0 {
-            model.reportError("\(failedCount) 个相册项目读取失败，其余已继续上传")
-        }
+    }
+
+    private func stagedPickedMedia(
+        _ item: PhotosPickerItem,
+        index: Int,
+        isVideo: Bool
+    ) async throws -> URL? {
+        precondition(!isVideo, "本地相册视频必须走零副本流式上传")
+        guard let image = try await item.loadTransferable(type: DrivePickedImageFile.self) else { return nil }
+        let ext = image.url.pathExtension.isEmpty ? "jpg" : image.url.pathExtension
+        return try await ChatAttachmentStaging.renameTransferredFile(
+            image.url,
+            preferredFileName: "照片 \(index + 1).\(ext)"
+        )
     }
 
     private func loadThumbnail(for entry: DriveFileEntry) async {
@@ -2747,23 +2942,30 @@ private extension DriveFileEntry {
     }
 }
 
-// [修改] 相册照片/视频通过文件传输表示落盘，避免大文件整体读进内存后再写盘。
+// 相册照片维持既有文件表示；网盘视频由上方 Photos 资源流直接上传，不经过此暂存类型。
+private enum DrivePhotoLibraryAccess {
+    static func requestReadAccessIfNeeded() async -> Bool {
+        let current = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        switch current {
+        case .authorized, .limited:
+            return true
+        case .notDetermined:
+            let updated = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+            return updated == .authorized || updated == .limited
+        case .denied, .restricted:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+}
+
 private struct DrivePickedImageFile: Transferable, Sendable {
     let url: URL
 
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(importedContentType: .image) { received in
             Self(url: try ChatAttachmentStaging.copyTransferredFile(received.file, fallbackExtension: "jpg"))
-        }
-    }
-}
-
-private struct DrivePickedVideoFile: Transferable, Sendable {
-    let url: URL
-
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(importedContentType: .movie) { received in
-            Self(url: try ChatAttachmentStaging.copyTransferredFile(received.file, fallbackExtension: "mov"))
         }
     }
 }

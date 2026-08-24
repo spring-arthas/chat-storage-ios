@@ -31,6 +31,8 @@ enum TransferFileName {
 }
 
 enum TransferStatus: String, Codable, Equatable, Hashable, Sendable {
+    // 相册大文件在系统导入/本地落盘完成前也必须可见，不能等到真正开始传输才创建任务。
+    case preparing
     case queued
     case hashing
     case running
@@ -43,7 +45,7 @@ enum TransferStatus: String, Codable, Equatable, Hashable, Sendable {
     var isTerminal: Bool { self == .completed || self == .failed || self == .cancelled }
     var isActive: Bool { !isTerminal }
     // [修改] “进行中”只包含实际排队或执行状态，暂停任务单独分组。
-    var isExecuting: Bool { self == .queued || self == .hashing || self == .running }
+    var isExecuting: Bool { self == .preparing || self == .queued || self == .hashing || self == .running }
 }
 
 struct TransferTaskRecord: Codable, Equatable, Identifiable, Sendable {
@@ -51,6 +53,8 @@ struct TransferTaskRecord: Codable, Equatable, Identifiable, Sendable {
     let direction: TransferDirection
     var status: TransferStatus
     let sourcePath: String?
+    // 网盘相册视频的零副本上传只保存 Photos 资源标识，不在 App 沙盒落盘源文件。
+    let photoLibraryAssetIdentifier: String?
     let destinationPath: String?
     // [修改] 外部目录下载必须持久化相对路径，避免恢复后压平子目录并覆盖同名文件。
     let destinationRelativePath: String?
@@ -84,6 +88,7 @@ struct TransferTaskRecord: Codable, Equatable, Identifiable, Sendable {
         direction: TransferDirection,
         status: TransferStatus,
         sourcePath: String?,
+        photoLibraryAssetIdentifier: String? = nil,
         destinationPath: String?,
         destinationRelativePath: String? = nil,
         destinationDirectoryBookmark: Data? = nil,
@@ -108,6 +113,7 @@ struct TransferTaskRecord: Codable, Equatable, Identifiable, Sendable {
         self.direction = direction
         self.status = status
         self.sourcePath = sourcePath
+        self.photoLibraryAssetIdentifier = photoLibraryAssetIdentifier
         self.destinationPath = destinationPath
         self.destinationRelativePath = destinationRelativePath
         self.destinationDirectoryBookmark = destinationDirectoryBookmark
@@ -407,6 +413,30 @@ actor FileTransferTaskStore {
         try commit(updatedRecords)
     }
 
+    // 相册流式源需先扫描一次才能得到大小和 MD5；两项必须一次提交，避免界面显示互相矛盾的元数据。
+    func setPhotoLibraryUploadMetadata(id: String, fileSize: Int64, md5: String) throws {
+        guard var task = records[id], task.photoLibraryAssetIdentifier != nil else { return }
+        task.fileSize = max(0, fileSize)
+        task.md5 = md5
+        task.updatedAt = Self.now
+        var updatedRecords = records
+        updatedRecords[id] = task
+        try commit(updatedRecords)
+    }
+
+    // 相册导入完成后才知道实际文件大小；同一个已显示的任务随后进入上传队列。
+    func finishPreparingUpload(id: String, fileSize: Int64) throws -> TransferTaskRecord? {
+        guard var task = records[id], task.direction == .upload, task.status == .preparing else { return nil }
+        task.fileSize = max(0, fileSize)
+        task.status = .queued
+        task.errorMessage = nil
+        task.updatedAt = Self.now
+        var updatedRecords = records
+        updatedRecords[id] = task
+        try commit(updatedRecords)
+        return task
+    }
+
     // [修改] security-scoped bookmark 过期后写回新授权，保证重启恢复任务仍能访问原目录。
     func setDestinationDirectoryBookmark(id: String, bookmarkData: Data) throws {
         guard var task = records[id], task.destinationDirectoryBookmark != bookmarkData else { return }
@@ -538,9 +568,10 @@ actor FileTransferTaskStore {
         switch status {
         case .running: 0
         case .hashing: 1
-        case .queued: 2
-        case .paused, .pausedAuthentication: 3
-        case .completed, .failed, .cancelled: 4
+        case .preparing: 2
+        case .queued: 3
+        case .paused, .pausedAuthentication: 4
+        case .completed, .failed, .cancelled: 5
         }
     }
 

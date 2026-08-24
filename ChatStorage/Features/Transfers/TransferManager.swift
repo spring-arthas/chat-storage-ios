@@ -13,6 +13,31 @@ protocol TransferManaging: Sendable {
     func cleanupCompletedArtifacts(taskIDs: Set<String>) async throws
 }
 
+// 网盘相册入口专用：先显示一个“正在导入”的持久任务；视频只保存 Photos 资源标识，绝不落盘副本。
+// 聊天、动态和普通文件选择继续使用既有 upload 方法，不走这条路径。
+struct PhotoLibraryUploadPreparation: Equatable, Sendable {
+    let taskId: String
+}
+
+protocol PhotoLibraryUploadPreparing: Sendable {
+    func beginPhotoLibraryUpload(
+        fileName: String,
+        photoLibraryAssetIdentifier: String?,
+        targetDirectoryId: Int64,
+        uploadPurpose: String,
+        batchId: String?
+    ) async throws -> PhotoLibraryUploadPreparation
+    func finishPhotoLibraryUpload(
+        _ preparation: PhotoLibraryUploadPreparation,
+        sourceURL: URL
+    ) async throws
+    func startPhotoLibraryVideoUpload(_ preparation: PhotoLibraryUploadPreparation) async throws
+    func failPhotoLibraryUpload(
+        _ preparation: PhotoLibraryUploadPreparation,
+        message: String
+    ) async
+}
+
 struct TransferCompletionEvent: Equatable, Sendable {
     let taskId: String
     let direction: TransferDirection
@@ -57,6 +82,7 @@ actor TransferManager {
     private let ownerUserId: Int64
     private let store: FileTransferTaskStore
     private let uploadEngine: any FileUploading
+    private let photoLibraryUploadEngine: any PhotoLibraryUploading
     private let downloadEngine: any FileDownloading
     private let rangePullEngine: any FileRangePulling
     private let executionLimiter: TransferExecutionLimiter
@@ -77,6 +103,7 @@ actor TransferManager {
         credentialStore: TransferCredentialStore? = nil,
         store: FileTransferTaskStore = .shared,
         uploadEngine: any FileUploading = FileUploadEngine(),
+        photoLibraryUploadEngine: any PhotoLibraryUploading = FileUploadEngine(),
         downloadEngine: any FileDownloading = FileDownloadEngine(),
         rangePullEngine: any FileRangePulling = FileRangePullEngine(),
         sourceRootURL: URL? = nil,
@@ -92,6 +119,7 @@ actor TransferManager {
         self.ownerUserId = identity.userId
         self.store = store
         self.uploadEngine = uploadEngine
+        self.photoLibraryUploadEngine = photoLibraryUploadEngine
         self.downloadEngine = downloadEngine
         self.rangePullEngine = rangePullEngine
         executionLimiter = TransferExecutionLimiter(maxConcurrent: maxConcurrentTransfers)
@@ -190,6 +218,118 @@ actor TransferManager {
         } catch {
             activeJobs.removeValue(forKey: taskId)
             throw error
+        }
+    }
+
+    // 任务记录必须先于相册大文件的本地导入创建，否则数 GB 视频在复制期间传输中心会是空的。
+    func beginPhotoLibraryUpload(
+        fileName: String,
+        photoLibraryAssetIdentifier: String? = nil,
+        targetDirectoryId: Int64,
+        uploadPurpose: String = "CLOUD_FILE",
+        batchId: String? = nil
+    ) async throws -> PhotoLibraryUploadPreparation {
+        guard targetDirectoryId > 0 else { throw FileTransferError.invalidDirectoryId }
+        let identity = credentialStore.current()
+        let taskId = UUID().uuidString
+        let safeName = TransferFileName.safeLocalName(fileName, fallback: "upload-")
+        let sourceURL = photoLibraryAssetIdentifier == nil ? persistedUploadSourceURL(taskId: taskId, fileName: safeName) : nil
+        let now = Self.now
+        let record = TransferTaskRecord(
+            id: taskId,
+            direction: .upload,
+            status: .preparing,
+            sourcePath: sourceURL?.path,
+            photoLibraryAssetIdentifier: photoLibraryAssetIdentifier,
+            destinationPath: nil,
+            fileName: safeName,
+            fileType: (sourceURL?.pathExtension ?? (safeName as NSString).pathExtension).lowercased(),
+            fileSize: 0,
+            remoteFileId: nil,
+            targetDirectoryId: targetDirectoryId,
+            uploadPurpose: uploadPurpose,
+            batchId: batchId,
+            serverScopeID: configuration.storageScopeID,
+            userId: identity.userId,
+            username: identity.username,
+            md5: nil,
+            transferredBytes: 0,
+            errorMessage: nil,
+            createdAt: now,
+            updatedAt: now
+        )
+        try await store.insert(record)
+        return PhotoLibraryUploadPreparation(taskId: taskId)
+    }
+
+    func startPhotoLibraryVideoUpload(_ preparation: PhotoLibraryUploadPreparation) async throws {
+        guard activeJobs[preparation.taskId] == nil,
+              let record = await store.task(id: preparation.taskId),
+              owns(record),
+              record.direction == .upload,
+              record.status == .preparing,
+              record.photoLibraryAssetIdentifier != nil else {
+            throw CancellationError()
+        }
+        let job = makePhotoLibraryUploadJob(record)
+        activeJobs[record.id] = .upload(job)
+        Task { [weak self] in
+            _ = await job.result
+            await self?.removeActiveJob(record.id)
+        }
+    }
+
+    // 把 PhotosPicker 的已暂存文件移动到任务自己的持久目录。移动跨卷失败时才回退复制，
+    // 因而不会再对数 GB 视频做无条件的第二次完整复制。
+    func finishPhotoLibraryUpload(
+        _ preparation: PhotoLibraryUploadPreparation,
+        sourceURL: URL
+    ) async throws {
+        guard activeJobs[preparation.taskId] == nil,
+              let record = await store.task(id: preparation.taskId),
+              owns(record),
+              record.direction == .upload,
+              record.status == .preparing,
+              let destinationPath = record.sourcePath else {
+            throw CancellationError()
+        }
+        let destinationURL = URL(fileURLWithPath: destinationPath)
+        do {
+            try moveImportedSource(sourceURL, to: destinationURL)
+            let values = try destinationURL.resourceValues(forKeys: [.fileSizeKey])
+            let fileSize = Int64(values.fileSize ?? 0)
+            guard let queuedRecord = try await store.finishPreparingUpload(
+                id: preparation.taskId,
+                fileSize: fileSize
+            ) else {
+                try? removePersistedUploadSource(at: destinationURL)
+                throw CancellationError()
+            }
+            let job = makeUploadJob(queuedRecord)
+            activeJobs[preparation.taskId] = .upload(job)
+            Task { [weak self] in
+                _ = await job.result
+                await self?.removeActiveJob(preparation.taskId)
+            }
+        } catch {
+            try? removePersistedUploadSource(at: destinationURL)
+            throw error
+        }
+    }
+
+    func failPhotoLibraryUpload(
+        _ preparation: PhotoLibraryUploadPreparation,
+        message: String
+    ) async {
+        guard let record = await store.task(id: preparation.taskId), owns(record) else { return }
+        _ = try? await store.transition(
+            id: preparation.taskId,
+            to: .failed,
+            allowedFrom: [.preparing],
+            errorMessage: message
+        )
+        if let sourcePath = record.sourcePath {
+            try? removePersistedUploadSource(at: URL(fileURLWithPath: sourcePath))
         }
     }
 
@@ -619,9 +759,12 @@ actor TransferManager {
         let changed = (try? await store.transition(
             id: taskId,
             to: .cancelled,
-            allowedFrom: [.queued, .hashing, .running, .paused, .pausedAuthentication, .failed]
+            allowedFrom: [.preparing, .queued, .hashing, .running, .paused, .pausedAuthentication, .failed]
         )) == true
         if changed || record.status == .cancelled { activeJobs[taskId]?.cancel() }
+        if changed, record.status == .preparing, let sourcePath = record.sourcePath {
+            try? removePersistedUploadSource(at: URL(fileURLWithPath: sourcePath))
+        }
     }
 
     func cancelAll() async {
@@ -686,7 +829,7 @@ actor TransferManager {
               record.status != .cancelled else { return }
         switch record.direction {
         case .upload:
-            let job = makeUploadJob(record)
+            let job = record.photoLibraryAssetIdentifier == nil ? makeUploadJob(record) : makePhotoLibraryUploadJob(record)
             activeJobs[taskId] = .upload(job)
             Task { [weak self] in
                 _ = await job.result
@@ -712,8 +855,17 @@ actor TransferManager {
     }
 
     func reschedulePending() async {
+        // 照片和普通相册文件导入尚未获得可恢复源时才失败；视频只保存 Photos 标识，可在重启后重新从相册分块读取。
+        for task in await store.all() where owns(task) && task.status == .preparing && task.photoLibraryAssetIdentifier == nil {
+            _ = try? await store.transition(
+                id: task.id,
+                to: .failed,
+                allowedFrom: [.preparing],
+                errorMessage: "相册导入被应用中断，请重新选择文件"
+            )
+        }
         // [修改] 登录恢复只重启本账号任务，避免使用当前 token 继续其他账号的上传或下载。
-        for task in await store.all() where owns(task) && [.queued, .hashing, .running, .pausedAuthentication].contains(task.status) {
+        for task in await store.all() where owns(task) && ([.queued, .hashing, .running, .pausedAuthentication].contains(task.status) || (task.status == .preparing && task.photoLibraryAssetIdentifier != nil)) {
             await retry(task.id)
         }
     }
@@ -787,6 +939,98 @@ actor TransferManager {
                         id: record.id,
                         to: .failed,
                         allowedFrom: [.queued, .failed, .paused, .pausedAuthentication, .hashing, .running],
+                        errorMessage: error.localizedDescription
+                    )
+                    throw error
+                }
+            }
+        }
+    }
+
+    // 相册本地视频直接从 Photos 分块读取：不调用 persistSource，也不创建任务源文件目录。
+    private func makePhotoLibraryUploadJob(_ record: TransferTaskRecord) -> Task<UploadResult, Error> {
+        let configuration = configuration
+        let credentialStore = credentialStore
+        let photoLibraryUploadEngine = photoLibraryUploadEngine
+        let store = store
+        let executionLimiter = executionLimiter
+        let networkGate = networkGate
+        let completionBroadcaster = completionBroadcaster
+        return Task {
+            try await networkGate.waitUntilAllowed()
+            return try await executionLimiter.withPermit {
+                do {
+                    let identity = credentialStore.current()
+                    guard let assetIdentifier = record.photoLibraryAssetIdentifier,
+                          let targetDirectoryId = record.targetDirectoryId else {
+                        throw FileTransferError.invalidResponse("相册上传任务缺少视频资源或目标目录")
+                    }
+                    try await store.transition(
+                        id: record.id,
+                        to: .hashing,
+                        allowedFrom: [.preparing, .queued, .failed, .paused, .pausedAuthentication, .hashing, .running]
+                    )
+                    let result = try await photoLibraryUploadEngine.uploadPhotoLibraryVideo(
+                        command: UploadCommand(
+                            configuration: configuration,
+                            identity: identity,
+                            taskId: record.id,
+                            targetDirectoryId: targetDirectoryId,
+                            requestedOffset: record.transferredBytes,
+                            knownMD5: record.md5,
+                            uploadPurpose: record.uploadPurpose ?? "CLOUD_FILE",
+                            batchId: record.batchId
+                        ),
+                        assetLocalIdentifier: assetIdentifier,
+                        fileName: record.fileName,
+                        fileType: record.fileType,
+                        knownFileSize: record.fileSize > 0 ? record.fileSize : nil,
+                        onMetadataComputed: { metadata in
+                            try await store.setPhotoLibraryUploadMetadata(
+                                id: record.id,
+                                fileSize: metadata.fileSize,
+                                md5: metadata.md5
+                            )
+                            try await store.transition(
+                                id: record.id,
+                                to: .running,
+                                allowedFrom: [.hashing, .running]
+                            )
+                        },
+                        onProgress: { progress in
+                            try? await store.setProgress(
+                                id: record.id,
+                                transferredBytes: progress.transferredBytes,
+                                totalBytes: progress.totalBytes
+                            )
+                        }
+                    )
+                    let completed = try await store.complete(
+                        id: record.id,
+                        remoteFileId: result.fileId,
+                        transferredBytes: result.uploadedBytes
+                    )
+                    if completed {
+                        completionBroadcaster.yield(.init(
+                            taskId: record.id,
+                            direction: .upload,
+                            remoteFileId: result.fileId,
+                            destinationPath: nil
+                        ))
+                    }
+                    return result
+                } catch is CancellationError {
+                    _ = try? await store.transition(
+                        id: record.id,
+                        to: .paused,
+                        allowedFrom: [.preparing, .queued, .hashing, .running]
+                    )
+                    throw CancellationError()
+                } catch {
+                    _ = try? await store.transition(
+                        id: record.id,
+                        to: .failed,
+                        allowedFrom: [.preparing, .queued, .failed, .paused, .pausedAuthentication, .hashing, .running],
                         errorMessage: error.localizedDescription
                     )
                     throw error
@@ -895,6 +1139,28 @@ actor TransferManager {
         }
     }
 
+    private func persistedUploadSourceURL(taskId: String, fileName: String) -> URL {
+        sourceRootURL
+            .appendingPathComponent(taskId, isDirectory: true)
+            .appendingPathComponent(fileName)
+    }
+
+    private func moveImportedSource(_ sourceURL: URL, to destinationURL: URL) throws {
+        try FileManager.default.createDirectory(
+            at: destinationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+        do {
+            try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
+        } catch {
+            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+            try? FileManager.default.removeItem(at: sourceURL)
+        }
+    }
+
     private func removePersistedUploadSource(for record: TransferTaskRecord) throws {
         guard let sourcePath = record.sourcePath else { return }
         try removePersistedUploadSource(at: URL(fileURLWithPath: sourcePath))
@@ -993,6 +1259,7 @@ actor TransferManager {
 
 extension TransferManager: TransferManaging {}
 extension TransferManager: FileDownloadManaging {}
+extension TransferManager: PhotoLibraryUploadPreparing {}
 
 private extension String {
     var nilIfBlank: String? {

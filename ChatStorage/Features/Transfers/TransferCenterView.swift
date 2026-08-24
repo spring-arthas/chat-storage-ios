@@ -120,6 +120,8 @@ struct TransferCenterView: View {
     private func actionButtons(_ task: TransferTaskRecord) -> some View {
         HStack(spacing: 8) {
             switch task.status {
+            case .preparing:
+                Button("取消", role: .destructive) { Task { await model.cancel(task) } }
             case .failed:
                 Button("重试") { Task { await model.retry(task) } }
             case .paused, .pausedAuthentication:
@@ -145,6 +147,7 @@ struct TransferCenterView: View {
 
     private func statusText(_ status: TransferStatus) -> String {
         switch status {
+        case .preparing: "正在导入"
         case .queued: "等待中"
         case .hashing: "首次校验"
         case .running: "传输中"

@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Network
+import Photos
 
 struct TransferIdentity: Equatable, Sendable {
     let userId: Int64
@@ -158,6 +159,24 @@ protocol FileUploading: Sendable {
         command: UploadCommand,
         sourceURL: URL,
         onMD5Computed: @escaping @Sendable (String) async throws -> Void,
+        onProgress: @escaping @Sendable (TransferProgress) async -> Void
+    ) async throws -> UploadResult
+}
+
+// 相册视频不生成 App 本地副本；先从 Photos 资源流计算元数据，再重新按块读取并发送。
+struct PhotoLibraryUploadMetadata: Equatable, Sendable {
+    let fileSize: Int64
+    let md5: String
+}
+
+protocol PhotoLibraryUploading: Sendable {
+    func uploadPhotoLibraryVideo(
+        command: UploadCommand,
+        assetLocalIdentifier: String,
+        fileName: String,
+        fileType: String,
+        knownFileSize: Int64?,
+        onMetadataComputed: @escaping @Sendable (PhotoLibraryUploadMetadata) async throws -> Void,
         onProgress: @escaping @Sendable (TransferProgress) async -> Void
     ) async throws -> UploadResult
 }
@@ -401,6 +420,56 @@ struct FileUploadEngine: Sendable {
         }
     }
 
+    func uploadPhotoLibraryVideo(
+        command: UploadCommand,
+        assetLocalIdentifier: String,
+        fileName: String,
+        fileType: String,
+        knownFileSize: Int64? = nil,
+        onMetadataComputed: @escaping @Sendable (PhotoLibraryUploadMetadata) async throws -> Void = { _ in },
+        onProgress: @escaping @Sendable (TransferProgress) async -> Void = { _ in }
+    ) async throws -> UploadResult {
+        guard !command.taskId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FileTransferError.invalidTaskId
+        }
+        guard command.targetDirectoryId > 0 else { throw FileTransferError.invalidDirectoryId }
+
+        let source = try PhotoLibraryVideoSource(assetLocalIdentifier: assetLocalIdentifier)
+        let metadata: PhotoLibraryUploadMetadata
+        if let md5 = command.knownMD5?.trimmedNonEmpty, let knownFileSize, knownFileSize > 0 {
+            // 重试已持久化过完整元数据，无需为 32 GiB 视频额外再扫描一次。
+            metadata = .init(fileSize: knownFileSize, md5: md5)
+        } else {
+            metadata = try await source.metadata()
+        }
+        try await onMetadataComputed(metadata)
+        try Task.checkCancellation()
+
+        let transport = TimedTransferFrameTransport(base: transportFactory(), timeouts: timeouts)
+        return try await withTaskCancellationHandler {
+            do {
+                try await transport.connect(host: command.configuration.host, port: command.configuration.uploadPort)
+                let result = try await performPhotoLibraryUpload(
+                    command: command,
+                    source: source,
+                    fileName: fileName,
+                    fileType: fileType,
+                    metadata: metadata,
+                    transport: transport,
+                    onProgress: onProgress
+                )
+                await transport.close()
+                return result
+            } catch {
+                await transport.close()
+                if Task.isCancelled { throw CancellationError() }
+                throw error
+            }
+        } onCancel: {
+            Task { await transport.close() }
+        }
+    }
+
     private func performUpload(
         command: UploadCommand,
         sourceURL: URL,
@@ -543,6 +612,120 @@ struct FileUploadEngine: Sendable {
         return UploadResult(fileId: fileId, uploadedBytes: fileSize)
     }
 
+    private func performPhotoLibraryUpload(
+        command: UploadCommand,
+        source: PhotoLibraryVideoSource,
+        fileName: String,
+        fileType: String,
+        metadata: PhotoLibraryUploadMetadata,
+        transport: TimedTransferFrameTransport,
+        onProgress: @escaping @Sendable (TransferProgress) async -> Void
+    ) async throws -> UploadResult {
+        let resumeRequest = UploadResumeRequest(
+            fileSize: metadata.fileSize, dirId: command.targetDirectoryId, fileName: fileName,
+            userId: command.identity.userId, userName: command.identity.username, taskId: command.taskId,
+            md5: metadata.md5, startOffset: command.requestedOffset, transferToken: command.identity.transferToken,
+            uploadPurpose: command.uploadPurpose, connectionReuse: false, batchId: command.batchId
+        )
+        let resume = try await requestAcknowledgement(
+            Frame(type: .resumeCheck, payload: try ProtocolJSON.encoder().encode(resumeRequest)),
+            expecting: .resumeAcknowledgement, taskId: command.taskId, transport: transport
+        )
+        if resume.status == "complete" {
+            guard let fileId = resume.fileId, fileId > 0 else {
+                throw FileTransferError.invalidResponse("服务端未返回有效文件 ID")
+            }
+            await onProgress(.init(transferredBytes: metadata.fileSize, totalBytes: metadata.fileSize))
+            return .init(fileId: fileId, uploadedBytes: metadata.fileSize)
+        }
+
+        let initialOffset: Int64
+        switch resume.status {
+        case "resume":
+            initialOffset = try validatedOffset(resume.uploadedSize ?? 0, maximum: metadata.fileSize)
+        case "new":
+            let request = UploadMetadataRequest(
+                md5: metadata.md5, fileName: fileName, fileSize: metadata.fileSize, fileType: fileType,
+                dirId: command.targetDirectoryId, userId: command.identity.userId, userName: command.identity.username,
+                taskId: command.taskId, transferToken: command.identity.transferToken, uploadPurpose: command.uploadPurpose,
+                connectionReuse: false, batchId: command.batchId
+            )
+            let ready = try await requestAcknowledgement(
+                Frame(type: .metadata, payload: try ProtocolJSON.encoder().encode(request)),
+                expecting: .acknowledgement, taskId: command.taskId, transport: transport
+            )
+            guard ready.status == "ready" else {
+                throw FileTransferError.server(ready.message ?? "服务端未准备好接收文件")
+            }
+            initialOffset = try validatedOffset(ready.uploadedSize ?? 0, maximum: metadata.fileSize)
+        default:
+            throw FileTransferError.server(resume.message ?? "未知上传断点状态")
+        }
+
+        await onProgress(.init(transferredBytes: initialOffset, totalBytes: metadata.fileSize))
+        var restartOffset = initialOffset
+        var rewindCount = 0
+        while true {
+            var offset = restartOffset
+            var lastAcknowledgedOffset = offset
+            do {
+                try await source.consume(from: offset) { data in
+                    var cursor = data.startIndex
+                    while cursor < data.endIndex {
+                        try Task.checkCancellation()
+                        let end = data.index(cursor, offsetBy: min(Self.photoLibraryUploadChunkSize, data.distance(from: cursor, to: data.endIndex)))
+                        let chunk = Data(data[cursor..<end])
+                        cursor = end
+                        let nextOffset = offset + Int64(chunk.count)
+                        let needsAcknowledgement = nextOffset == metadata.fileSize || nextOffset - lastAcknowledgedOffset >= Self.photoLibraryAcknowledgementWindow
+                        var flags = Frame.transferHasOffsetFlag
+                        if needsAcknowledgement { flags |= Frame.transferNeedsAcknowledgementFlag }
+                        let frame = Frame(type: .data, flags: flags, payload: offsetPayload(offset: offset, data: chunk))
+                        if needsAcknowledgement {
+                            let progress = try await requestAcknowledgement(frame, expecting: .acknowledgement, taskId: command.taskId, transport: transport)
+                            guard progress.status == "progress" else {
+                                throw FileTransferError.server(progress.message ?? "服务端上传进度确认失败")
+                            }
+                            let confirmed = try validatedOffset(progress.uploadedSize ?? 0, maximum: nextOffset)
+                            if confirmed < nextOffset {
+                                rewindCount += 1
+                                guard rewindCount <= Self.maximumRewindCount else {
+                                    throw FileTransferError.server("服务端进度多次落后，上传已停止")
+                                }
+                                throw PhotoLibraryUploadRewind(offset: confirmed)
+                            }
+                            lastAcknowledgedOffset = confirmed
+                        } else {
+                            try await transport.send(frame)
+                        }
+                        offset = nextOffset
+                        await onProgress(.init(transferredBytes: offset, totalBytes: metadata.fileSize))
+                    }
+                }
+                guard offset == metadata.fileSize else {
+                    throw FileTransferError.incompleteTransfer(expected: metadata.fileSize, actual: offset)
+                }
+                break
+            } catch let rewind as PhotoLibraryUploadRewind {
+                restartOffset = rewind.offset
+                await onProgress(.init(transferredBytes: restartOffset, totalBytes: metadata.fileSize))
+            }
+        }
+
+        let completed = try await requestAcknowledgement(
+            Frame(type: .end, payload: try ProtocolJSON.encoder().encode(UploadEndRequest(taskId: command.taskId))),
+            expecting: .acknowledgement, taskId: command.taskId, transport: transport,
+            receiveTimeout: Self.uploadFinalizeTimeout(fileSize: metadata.fileSize)
+        )
+        guard completed.status == "success" else {
+            throw FileTransferError.server(completed.message ?? "文件完整性校验失败")
+        }
+        guard let fileId = completed.fileId, fileId > 0 else {
+            throw FileTransferError.invalidResponse("服务端未返回有效文件 ID")
+        }
+        return .init(fileId: fileId, uploadedBytes: metadata.fileSize)
+    }
+
     private func requestAcknowledgement(
         _ frame: Frame,
         expecting expectedType: FrameType,
@@ -605,10 +788,176 @@ struct FileUploadEngine: Sendable {
 
     private static let chunkSize = 64 * 1024
     private static let acknowledgementWindow: Int64 = 4 * 1024 * 1024
+    // 相册零副本路径减少帧数量，32 GiB 视频约 32K 个数据帧；常规文件路径保持既有 64 KiB 兼容参数。
+    private static let photoLibraryUploadChunkSize = 1024 * 1024
+    private static let photoLibraryAcknowledgementWindow: Int64 = 8 * 1024 * 1024
     private static let maximumRewindCount = 12
 }
 
 extension FileUploadEngine: FileUploading {}
+extension FileUploadEngine: PhotoLibraryUploading {}
+
+private struct PhotoLibraryUploadRewind: Error {
+    let offset: Int64
+}
+
+// PHAssetResourceManager 直接交付 Photos 存储中的数据。网络访问明确关闭，因此 iCloud-only 资源不会被
+// 下载到 App 或变成本地副本；调用者会得到读取失败并要求用户先在相册中下载该视频。
+private final class PhotoLibraryVideoSource: @unchecked Sendable {
+    private let assetLocalIdentifier: String
+
+    init(assetLocalIdentifier: String) throws {
+        guard !assetLocalIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FileTransferError.unreadableSource
+        }
+        self.assetLocalIdentifier = assetLocalIdentifier
+    }
+
+    func metadata() async throws -> PhotoLibraryUploadMetadata {
+        var digest = Insecure.MD5()
+        var size: Int64 = 0
+        try await consume { data in
+            try Task.checkCancellation()
+            digest.update(data: data)
+            size += Int64(data.count)
+        }
+        guard size > 0 else { throw FileTransferError.unreadableSource }
+        let md5 = digest.finalize().map { String(format: "%02x", $0) }.joined()
+        return .init(fileSize: size, md5: md5)
+    }
+
+    func consume(from offset: Int64 = 0, _ body: @escaping (Data) async throws -> Void) async throws {
+        let resource = try videoResource()
+        let pump = PhotoLibraryDataPump()
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = false
+        let requestID = PHAssetResourceManager.default().requestData(
+            for: resource,
+            options: options,
+            dataReceivedHandler: { data in pump.enqueue(data) },
+            completionHandler: { error in pump.finish(error: error) }
+        )
+        pump.setRequestID(requestID)
+
+        do {
+            try await withTaskCancellationHandler {
+                var remaining = max(0, offset)
+                while let delivered = try await pump.next() {
+                    defer { pump.release() }
+                    if remaining >= Int64(delivered.count) {
+                        remaining -= Int64(delivered.count)
+                        continue
+                    }
+                    let start = Int(remaining)
+                    remaining = 0
+                    try await body(start == 0 ? delivered : Data(delivered.dropFirst(start)))
+                }
+                guard remaining == 0 else { throw FileTransferError.unreadableSource }
+            } onCancel: {
+                pump.cancel()
+            }
+        } catch {
+            pump.cancel()
+            throw error
+        }
+    }
+
+    private func videoResource() throws -> PHAssetResource {
+        let result = PHAsset.fetchAssets(withLocalIdentifiers: [assetLocalIdentifier], options: nil)
+        guard let asset = result.firstObject else { throw FileTransferError.unreadableSource }
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let resource = resources.first(where: { $0.type == .video })
+            ?? resources.first(where: { $0.type == .fullSizeVideo }) else {
+            throw FileTransferError.unreadableSource
+        }
+        return resource
+    }
+}
+
+// Photos 的回调为同步 API；容量限制为两个系统数据包，上传端处理完一个才允许继续交付下一个，避免
+// AsyncStream 无界缓存导致大视频在内存里累积。
+private final class PhotoLibraryDataPump: @unchecked Sendable {
+    private let lock = NSLock()
+    private let capacity = DispatchSemaphore(value: 2)
+    private var buffered: [Data] = []
+    private var waiter: CheckedContinuation<Data?, Error>?
+    private var terminalError: Error?
+    private var finished = false
+    private var cancelled = false
+    private var requestID: PHAssetResourceDataRequestID?
+
+    func setRequestID(_ requestID: PHAssetResourceDataRequestID) {
+        lock.withLock {
+            self.requestID = requestID
+            if cancelled { PHAssetResourceManager.default().cancelDataRequest(requestID) }
+        }
+    }
+
+    func enqueue(_ data: Data) {
+        guard !data.isEmpty else { return }
+        capacity.wait()
+        let continuation: CheckedContinuation<Data?, Error>? = lock.withLock {
+            guard !cancelled, !finished else {
+                capacity.signal()
+                return nil
+            }
+            if let waiter {
+                self.waiter = nil
+                return waiter
+            }
+            buffered.append(data)
+            return nil
+        }
+        continuation?.resume(returning: data)
+    }
+
+    func finish(error: Error?) {
+        let continuation: CheckedContinuation<Data?, Error>? = lock.withLock {
+            guard !finished else { return nil }
+            finished = true
+            terminalError = error
+            guard buffered.isEmpty, let waiter else { return nil }
+            self.waiter = nil
+            return waiter
+        }
+        if let error { continuation?.resume(throwing: error) }
+        else { continuation?.resume(returning: nil) }
+    }
+
+    func next() async throws -> Data? {
+        try Task.checkCancellation()
+        return try await withCheckedThrowingContinuation { continuation in
+            let result: Result<Data?, Error>? = lock.withLock {
+                if !buffered.isEmpty { return .success(buffered.removeFirst()) }
+                if let terminalError { return .failure(terminalError) }
+                if finished { return .success(nil) }
+                waiter = continuation
+                return nil
+            }
+            if let result { continuation.resume(with: result) }
+        }
+    }
+
+    func release() { capacity.signal() }
+
+    func cancel() {
+        let requestID: PHAssetResourceDataRequestID? = lock.withLock {
+            guard !cancelled else { return nil }
+            cancelled = true
+            finished = true
+            let id = self.requestID
+            if let waiter {
+                self.waiter = nil
+                waiter.resume(throwing: CancellationError())
+            }
+            return id
+        }
+        // 回调可能正等待容量令牌；释放足够令牌让它观察取消状态并退出。
+        capacity.signal()
+        capacity.signal()
+        if let requestID { PHAssetResourceManager.default().cancelDataRequest(requestID) }
+    }
+}
 
 struct FileDownloadEngine: Sendable {
     private let transportFactory: @Sendable () -> any TransferFrameTransport

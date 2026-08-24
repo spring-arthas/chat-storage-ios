@@ -519,6 +519,74 @@ final class DriveViewModel {
         await upload(sourceURLs: [sourceURL])
     }
 
+    // 仅供网盘相册入口使用：先创建可见任务，再处理可能耗时很久的大文件导入。
+    func beginPhotoLibraryUpload(
+        fileName: String,
+        photoLibraryAssetIdentifier: String? = nil
+    ) async -> PhotoLibraryUploadPreparation? {
+        guard let directoryId = currentDirectory?.id else {
+            errorMessage = "网盘目录尚未加载，请稍后再试"
+            return nil
+        }
+        guard !isRootDirectory(directoryId) else {
+            errorMessage = "根目录不能直接上传，请先进入子文件夹"
+            return nil
+        }
+        guard let manager = transferManager as? any PhotoLibraryUploadPreparing else {
+            errorMessage = "当前账号没有可用的文件传输凭据"
+            return nil
+        }
+        do {
+            return try await manager.beginPhotoLibraryUpload(
+                fileName: fileName,
+                photoLibraryAssetIdentifier: photoLibraryAssetIdentifier,
+                targetDirectoryId: directoryId,
+                uploadPurpose: "CLOUD_FILE",
+                batchId: nil
+            )
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? "创建上传任务失败"
+            return nil
+        }
+    }
+
+    func startPhotoLibraryVideoUpload(_ preparation: PhotoLibraryUploadPreparation) async {
+        guard let manager = transferManager as? any PhotoLibraryUploadPreparing else { return }
+        do {
+            try await manager.startPhotoLibraryVideoUpload(preparation)
+        } catch is CancellationError {
+            // 用户在“正在导入”阶段取消时不报告额外错误。
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? "相册视频上传失败"
+            await manager.failPhotoLibraryUpload(preparation, message: message)
+            errorMessage = message
+        }
+    }
+
+    func finishPhotoLibraryUpload(
+        _ preparation: PhotoLibraryUploadPreparation,
+        sourceURL: URL
+    ) async {
+        guard let manager = transferManager as? any PhotoLibraryUploadPreparing else { return }
+        do {
+            try await manager.finishPhotoLibraryUpload(preparation, sourceURL: sourceURL)
+        } catch is CancellationError {
+            // 用户在导入期间主动取消时，不额外弹出错误。
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? "相册文件导入失败"
+            await manager.failPhotoLibraryUpload(
+                preparation,
+                message: message
+            )
+            errorMessage = message
+        }
+    }
+
+    func failPhotoLibraryUpload(_ preparation: PhotoLibraryUploadPreparation, message: String) async {
+        guard let manager = transferManager as? any PhotoLibraryUploadPreparing else { return }
+        await manager.failPhotoLibraryUpload(preparation, message: message)
+    }
+
     // [修改] 多选文件并发提交，所有记录先落盘，实际执行并发由 TransferManager 控制。
     func upload(sourceURLs: [URL]) async {
         guard !sourceURLs.isEmpty else { return }

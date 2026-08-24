@@ -214,11 +214,11 @@ actor RemoteMediaRepository: MediaPlaybackProviding {
         guard let playUrl = value.playUrl,
               let rawURL = URL(string: playUrl),
               let normalized = normalize(rawURL) else {
-            print("[Media] play-url response has invalid playUrl: \(value.playUrl ?? "nil"); body=\(Self.redactedBody(data))")
+            print("[Media] play-url response has invalid playUrl: \(Self.redactedURL(value.playUrl)); body=\(Self.redactedBody(data))")
             throw MediaRepositoryError.invalidResponse
         }
         // [修改] 输出服务端广告地址与最终播放地址，便于真机判断连不上的是哪一段。
-        print("[Media] play-url resolved: raw=\(value.playUrl ?? "nil") -> stream=\(normalized.absoluteString)")
+        print("[Media] play-url resolved: raw=\(Self.redactedURL(value.playUrl)) -> stream=\(Self.redactedURL(normalized.absoluteString))")
         return MediaPlayback(
             fileId: value.fileId ?? fileId,
             playURL: normalized,
@@ -266,8 +266,17 @@ actor RemoteMediaRepository: MediaPlaybackProviding {
 
     private static func redactedBody(_ data: Data) -> String {
         let body = String(decoding: data, as: UTF8.self)
-        guard body.count <= 2_000 else { return String(body.prefix(2_000)) + "..." }
-        return body.replacingOccurrences(
+        let limited = body.count <= 2_000 ? body : String(body.prefix(2_000)) + "..."
+        return redactSecrets(in: limited)
+    }
+
+    private static func redactedURL(_ value: String?) -> String {
+        guard let value else { return "nil" }
+        return redactSecrets(in: value)
+    }
+
+    private static func redactSecrets(in value: String) -> String {
+        value.replacingOccurrences(
             of: #"([?&](?:token|access_token|signature)=)[^&#\"}]+"#,
             with: "$1<redacted>",
             options: .regularExpression

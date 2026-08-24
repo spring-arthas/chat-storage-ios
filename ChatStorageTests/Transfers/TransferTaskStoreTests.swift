@@ -92,6 +92,73 @@ final class TransferTaskStoreTests: XCTestCase {
         XCTAssertTrue(retainedTasks.isEmpty)
     }
 
+    // 数 GB 相册视频在系统导入期间也必须先出现在传输中心；不能等本地文件复制完才落任务。
+    func testPhotoLibraryUploadPersistsPreparingTaskBeforeImportAndThenStartsUpload() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let stagedDirectory = root.appendingPathComponent("staged", isDirectory: true)
+        let stagedSource = stagedDirectory.appendingPathComponent("clip.mp4")
+        try FileManager.default.createDirectory(at: stagedDirectory, withIntermediateDirectories: true)
+        try Data("video-data".utf8).write(to: stagedSource)
+        let store = FileTransferTaskStore(fileURL: root.appendingPathComponent("tasks.json"))
+        let sourceRoot = root.appendingPathComponent("sources", isDirectory: true)
+        let manager = TransferManager(
+            configuration: try ServerConfiguration(host: "127.0.0.1"),
+            identity: TransferIdentity(userId: 7, username: "alice", transferToken: "secret-token"),
+            store: store,
+            uploadEngine: SuccessfulUploadEngine(),
+            sourceRootURL: sourceRoot
+        )
+
+        let preparation = try await manager.beginPhotoLibraryUpload(
+            fileName: "视频 1.mp4",
+            targetDirectoryId: 12
+        )
+
+        let preparingTask = await store.task(id: preparation.taskId)
+        let preparing = try XCTUnwrap(preparingTask)
+        XCTAssertEqual(preparing.status, .preparing)
+        XCTAssertEqual(preparing.fileSize, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: preparing.sourcePath ?? ""))
+
+        try await manager.finishPhotoLibraryUpload(preparation, sourceURL: stagedSource)
+
+        let completed = await waitForTask(id: preparation.taskId, status: .completed, store: store)
+        XCTAssertEqual(completed?.fileName, "视频 1.mp4")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagedSource.path))
+    }
+
+    func testPhotoLibraryVideoUploadUsesAssetIdentifierWithoutCreatingSourceCopy() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = FileTransferTaskStore(fileURL: root.appendingPathComponent("tasks.json"))
+        let sourceRoot = root.appendingPathComponent("sources", isDirectory: true)
+        let manager = TransferManager(
+            configuration: try ServerConfiguration(host: "127.0.0.1"),
+            identity: TransferIdentity(userId: 7, username: "alice", transferToken: "secret-token"),
+            store: store,
+            uploadEngine: SuccessfulUploadEngine(),
+            photoLibraryUploadEngine: SuccessfulPhotoLibraryUploadEngine(),
+            sourceRootURL: sourceRoot
+        )
+
+        let preparation = try await manager.beginPhotoLibraryUpload(
+            fileName: "本地视频.mp4",
+            photoLibraryAssetIdentifier: "photo-local-id",
+            targetDirectoryId: 12
+        )
+        let preparingTask = await store.task(id: preparation.taskId)
+        let preparing = try XCTUnwrap(preparingTask)
+        XCTAssertEqual(preparing.status, .preparing)
+        XCTAssertEqual(preparing.photoLibraryAssetIdentifier, "photo-local-id")
+        XCTAssertNil(preparing.sourcePath)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sourceRoot.path))
+
+        try await manager.startPhotoLibraryVideoUpload(preparation)
+        let completed = await waitForTask(id: preparation.taskId, status: .completed, store: store)
+        XCTAssertEqual(completed?.fileSize, 32 * 1024 * 1024)
+        XCTAssertEqual(completed?.md5, "photo-md5")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sourceRoot.path))
+    }
+
     // [修改] 系统标记 bookmark 过期后必须重新生成可解析的新数据；未过期时不做多余写入。
     func testStaleDestinationBookmarkIsRefreshedForTheSameDirectory() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1493,6 +1560,22 @@ private struct SuccessfulUploadEngine: FileUploading {
         await onProgress(TransferProgress(transferredBytes: 5, totalBytes: 10))
         await onProgress(TransferProgress(transferredBytes: 10, totalBytes: 10))
         return UploadResult(fileId: 901, uploadedBytes: 10)
+    }
+}
+
+private struct SuccessfulPhotoLibraryUploadEngine: PhotoLibraryUploading {
+    func uploadPhotoLibraryVideo(
+        command: UploadCommand,
+        assetLocalIdentifier: String,
+        fileName: String,
+        fileType: String,
+        knownFileSize: Int64?,
+        onMetadataComputed: @escaping @Sendable (PhotoLibraryUploadMetadata) async throws -> Void,
+        onProgress: @escaping @Sendable (TransferProgress) async -> Void
+    ) async throws -> UploadResult {
+        try await onMetadataComputed(.init(fileSize: 32 * 1024 * 1024, md5: "photo-md5"))
+        await onProgress(.init(transferredBytes: 32 * 1024 * 1024, totalBytes: 32 * 1024 * 1024))
+        return .init(fileId: 902, uploadedBytes: 32 * 1024 * 1024)
     }
 }
 

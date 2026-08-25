@@ -91,7 +91,7 @@ struct TransferCenterView: View {
                     HStack(spacing: 8) {
                         ProgressView(value: task.progress)
                             .tint(task.status == .failed ? .red : AppTheme.primaryGreen)
-                        if task.status == .running {
+                        if task.status == .running || task.status == .verifying {
                             // [修改] 上传中显示实时百分比，进度条增长效果更直观。
                             Text("\(Int((task.progress * 100).rounded()))%")
                                 .font(.caption2.weight(.medium))
@@ -126,7 +126,7 @@ struct TransferCenterView: View {
                 Button("重试") { Task { await model.retry(task) } }
             case .paused, .pausedAuthentication:
                 Button("继续") { Task { await model.retry(task) } }
-            case .queued, .hashing, .running:
+            case .queued, .hashing, .running, .verifying:
                 Button("暂停") { Task { await model.pause(task) } }
             case .completed:
                 if task.direction == .download {
@@ -151,6 +151,7 @@ struct TransferCenterView: View {
         case .queued: "等待中"
         case .hashing: "首次校验"
         case .running: "传输中"
+        case .verifying: "服务端正在校验"
         case .paused: "已暂停"
         case .pausedAuthentication: "等待登录"
         case .completed: "已完成"

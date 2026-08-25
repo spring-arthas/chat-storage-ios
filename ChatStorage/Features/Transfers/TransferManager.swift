@@ -86,6 +86,8 @@ actor TransferManager {
     private let downloadEngine: any FileDownloading
     private let rangePullEngine: any FileRangePulling
     private let executionLimiter: TransferExecutionLimiter
+    // 相册视频的五个上传名额独立于普通上传/下载，避免下载占满名额导致相册视频达不到约定并发数。
+    private let photoLibraryUploadLimiter: TransferExecutionLimiter
     private let networkGate: TransferNetworkGate
     private let managesNetworkMonitor: Bool
     private let sourceRootURL: URL
@@ -123,6 +125,7 @@ actor TransferManager {
         self.downloadEngine = downloadEngine
         self.rangePullEngine = rangePullEngine
         executionLimiter = TransferExecutionLimiter(maxConcurrent: maxConcurrentTransfers)
+        photoLibraryUploadLimiter = TransferExecutionLimiter(maxConcurrent: maxConcurrentTransfers)
         let resolvedNetworkGate = networkGate ?? TransferNetworkGate(
             wifiOnly: wifiOnlyTransfers,
             isOnWiFi: false
@@ -271,7 +274,16 @@ actor TransferManager {
               record.photoLibraryAssetIdentifier != nil else {
             throw CancellationError()
         }
-        let job = makePhotoLibraryUploadJob(record)
+        // 任务从相册选择完成后立刻进入持久队列。只有取得上传许可的任务才会切换到 hashing/running，
+        // 因此多选时第 6 个及以后的视频会明确显示“等待中”，不会伪装成仍在导入。
+        try await store.transition(
+            id: record.id,
+            to: .queued,
+            allowedFrom: [.preparing]
+        )
+        // 先在 actor 内登记选择顺序，再由独立任务等待自己的名额，避免 detached 调度重排 FIFO。
+        let reservation = await photoLibraryUploadLimiter.reserve()
+        let job = makePhotoLibraryUploadJob(record, reservation: reservation)
         activeJobs[record.id] = .upload(job)
         Task { [weak self] in
             _ = await job.result
@@ -748,7 +760,7 @@ actor TransferManager {
         let changed = (try? await store.transition(
             id: taskId,
             to: .paused,
-            allowedFrom: [.queued, .hashing, .running, .failed, .pausedAuthentication]
+            allowedFrom: [.queued, .hashing, .running, .verifying, .failed, .pausedAuthentication]
         )) == true
         if changed || record.status == .paused { activeJobs[taskId]?.cancel() }
     }
@@ -759,7 +771,7 @@ actor TransferManager {
         let changed = (try? await store.transition(
             id: taskId,
             to: .cancelled,
-            allowedFrom: [.preparing, .queued, .hashing, .running, .paused, .pausedAuthentication, .failed]
+            allowedFrom: [.preparing, .queued, .hashing, .running, .verifying, .paused, .pausedAuthentication, .failed]
         )) == true
         if changed || record.status == .cancelled { activeJobs[taskId]?.cancel() }
         if changed, record.status == .preparing, let sourcePath = record.sourcePath {
@@ -779,13 +791,13 @@ actor TransferManager {
     func shutdown() async {
         // [修改] 手动 paused 必须保持用户意图；只有原本会自动执行的状态才切到等待登录。
         let ownedActiveTasks = await store.all().filter {
-            owns($0) && [.queued, .hashing, .running].contains($0.status)
+            owns($0) && [.queued, .hashing, .running, .verifying].contains($0.status)
         }
         for task in ownedActiveTasks {
             _ = try? await store.transition(
                 id: task.id,
                 to: .pausedAuthentication,
-                allowedFrom: [.queued, .hashing, .running]
+                allowedFrom: [.queued, .hashing, .running, .verifying]
             )
         }
 
@@ -829,7 +841,13 @@ actor TransferManager {
               record.status != .cancelled else { return }
         switch record.direction {
         case .upload:
-            let job = record.photoLibraryAssetIdentifier == nil ? makeUploadJob(record) : makePhotoLibraryUploadJob(record)
+            let job: Task<UploadResult, Error>
+            if record.photoLibraryAssetIdentifier == nil {
+                job = makeUploadJob(record)
+            } else {
+                let reservation = await photoLibraryUploadLimiter.reserve()
+                job = makePhotoLibraryUploadJob(record, reservation: reservation)
+            }
             activeJobs[taskId] = .upload(job)
             Task { [weak self] in
                 _ = await job.result
@@ -865,7 +883,7 @@ actor TransferManager {
             )
         }
         // [修改] 登录恢复只重启本账号任务，避免使用当前 token 继续其他账号的上传或下载。
-        for task in await store.all() where owns(task) && ([.queued, .hashing, .running, .pausedAuthentication].contains(task.status) || (task.status == .preparing && task.photoLibraryAssetIdentifier != nil)) {
+        for task in await store.all() where owns(task) && ([.queued, .hashing, .running, .verifying, .pausedAuthentication].contains(task.status) || (task.status == .preparing && task.photoLibraryAssetIdentifier != nil)) {
             await retry(task.id)
         }
     }
@@ -890,7 +908,7 @@ actor TransferManager {
                     try await store.transition(
                         id: record.id,
                         to: .hashing,
-                        allowedFrom: [.queued, .failed, .paused, .pausedAuthentication, .hashing, .running]
+                        allowedFrom: [.queued, .failed, .paused, .pausedAuthentication, .hashing, .running, .verifying]
                     )
                     let result = try await uploadEngine.upload(
                         command: UploadCommand(
@@ -915,6 +933,14 @@ actor TransferManager {
                                 transferredBytes: progress.transferredBytes,
                                 totalBytes: progress.totalBytes
                             )
+                            if progress.totalBytes > 0, progress.transferredBytes >= progress.totalBytes {
+                                // 最后一个字节已发出；END 之后服务端还会做完整文件校验才会确认完成。
+                                _ = try? await store.transition(
+                                    id: record.id,
+                                    to: .verifying,
+                                    allowedFrom: [.running]
+                                )
+                            }
                         }
                     )
                     let completed = try await store.complete(id: record.id, remoteFileId: result.fileId, transferredBytes: result.uploadedBytes)
@@ -931,14 +957,14 @@ actor TransferManager {
                     _ = try? await store.transition(
                         id: record.id,
                         to: .paused,
-                        allowedFrom: [.queued, .hashing, .running]
+                        allowedFrom: [.queued, .hashing, .running, .verifying]
                     )
                     throw CancellationError()
                 } catch {
                     _ = try? await store.transition(
                         id: record.id,
                         to: .failed,
-                        allowedFrom: [.queued, .failed, .paused, .pausedAuthentication, .hashing, .running],
+                        allowedFrom: [.queued, .failed, .paused, .pausedAuthentication, .hashing, .running, .verifying],
                         errorMessage: error.localizedDescription
                     )
                     throw error
@@ -948,93 +974,112 @@ actor TransferManager {
     }
 
     // 相册本地视频直接从 Photos 分块读取：不调用 persistSource，也不创建任务源文件目录。
-    private func makePhotoLibraryUploadJob(_ record: TransferTaskRecord) -> Task<UploadResult, Error> {
+    private func makePhotoLibraryUploadJob(
+        _ record: TransferTaskRecord,
+        reservation: TransferExecutionLimiter.Reservation
+    ) -> Task<UploadResult, Error> {
         let configuration = configuration
         let credentialStore = credentialStore
         let photoLibraryUploadEngine = photoLibraryUploadEngine
         let store = store
-        let executionLimiter = executionLimiter
+        let photoLibraryUploadLimiter = photoLibraryUploadLimiter
         let networkGate = networkGate
         let completionBroadcaster = completionBroadcaster
-        return Task {
-            try await networkGate.waitUntilAllowed()
-            return try await executionLimiter.withPermit {
-                do {
-                    let identity = credentialStore.current()
-                    guard let assetIdentifier = record.photoLibraryAssetIdentifier,
-                          let targetDirectoryId = record.targetDirectoryId else {
-                        throw FileTransferError.invalidResponse("相册上传任务缺少视频资源或目标目录")
-                    }
-                    try await store.transition(
-                        id: record.id,
-                        to: .hashing,
-                        allowedFrom: [.preparing, .queued, .failed, .paused, .pausedAuthentication, .hashing, .running]
-                    )
-                    let result = try await photoLibraryUploadEngine.uploadPhotoLibraryVideo(
-                        command: UploadCommand(
-                            configuration: configuration,
-                            identity: identity,
-                            taskId: record.id,
-                            targetDirectoryId: targetDirectoryId,
-                            requestedOffset: record.transferredBytes,
-                            knownMD5: record.md5,
-                            uploadPurpose: record.uploadPurpose ?? "CLOUD_FILE",
-                            batchId: record.batchId
-                        ),
-                        assetLocalIdentifier: assetIdentifier,
-                        fileName: record.fileName,
-                        fileType: record.fileType,
-                        knownFileSize: record.fileSize > 0 ? record.fileSize : nil,
-                        onMetadataComputed: { metadata in
-                            try await store.setPhotoLibraryUploadMetadata(
-                                id: record.id,
-                                fileSize: metadata.fileSize,
-                                md5: metadata.md5
-                            )
-                            try await store.transition(
-                                id: record.id,
-                                to: .running,
-                                allowedFrom: [.hashing, .running]
-                            )
-                        },
-                        onProgress: { progress in
-                            try? await store.setProgress(
-                                id: record.id,
-                                transferredBytes: progress.transferredBytes,
-                                totalBytes: progress.totalBytes
-                            )
+        // 不继承 TransferManager actor：每个相册视频各自读取 Photos、建立独立 TCP 连接，
+        // 仅通过独立的相册上传名额竞争五个许可，避免多选任务在 actor 上串行启动。
+        return Task.detached {
+            do {
+                try await networkGate.waitUntilAllowed()
+                return try await photoLibraryUploadLimiter.withReservedPermit(reservation) {
+                    do {
+                        let identity = credentialStore.current()
+                        guard let assetIdentifier = record.photoLibraryAssetIdentifier,
+                              let targetDirectoryId = record.targetDirectoryId else {
+                            throw FileTransferError.invalidResponse("相册上传任务缺少视频资源或目标目录")
                         }
-                    )
-                    let completed = try await store.complete(
-                        id: record.id,
-                        remoteFileId: result.fileId,
-                        transferredBytes: result.uploadedBytes
-                    )
-                    if completed {
-                        completionBroadcaster.yield(.init(
-                            taskId: record.id,
-                            direction: .upload,
+                        try await store.transition(
+                            id: record.id,
+                            to: .hashing,
+                            allowedFrom: [.preparing, .queued, .failed, .paused, .pausedAuthentication, .hashing, .running, .verifying]
+                        )
+                        let result = try await photoLibraryUploadEngine.uploadPhotoLibraryVideo(
+                            command: UploadCommand(
+                                configuration: configuration,
+                                identity: identity,
+                                taskId: record.id,
+                                targetDirectoryId: targetDirectoryId,
+                                requestedOffset: record.transferredBytes,
+                                knownMD5: record.md5,
+                                uploadPurpose: record.uploadPurpose ?? "CLOUD_FILE",
+                                batchId: record.batchId
+                            ),
+                            assetLocalIdentifier: assetIdentifier,
+                            fileName: record.fileName,
+                            fileType: record.fileType,
+                            knownFileSize: record.fileSize > 0 ? record.fileSize : nil,
+                            onMetadataComputed: { metadata in
+                                try await store.setPhotoLibraryUploadMetadata(
+                                    id: record.id,
+                                    fileSize: metadata.fileSize,
+                                    md5: metadata.md5
+                                )
+                                try await store.transition(
+                                    id: record.id,
+                                    to: .running,
+                                    allowedFrom: [.hashing, .running]
+                                )
+                            },
+                            onProgress: { progress in
+                                try? await store.setProgress(
+                                    id: record.id,
+                                    transferredBytes: progress.transferredBytes,
+                                    totalBytes: progress.totalBytes
+                                )
+                                if progress.totalBytes > 0, progress.transferredBytes >= progress.totalBytes {
+                                    // Photos 视频同样在所有分块提交后等待服务端最终校验。
+                                    _ = try? await store.transition(
+                                        id: record.id,
+                                        to: .verifying,
+                                        allowedFrom: [.running]
+                                    )
+                                }
+                            }
+                        )
+                        let completed = try await store.complete(
+                            id: record.id,
                             remoteFileId: result.fileId,
-                            destinationPath: nil
-                        ))
+                            transferredBytes: result.uploadedBytes
+                        )
+                        if completed {
+                            completionBroadcaster.yield(.init(
+                                taskId: record.id,
+                                direction: .upload,
+                                remoteFileId: result.fileId,
+                                destinationPath: nil
+                            ))
+                        }
+                        return result
+                    } catch is CancellationError {
+                        _ = try? await store.transition(
+                            id: record.id,
+                            to: .paused,
+                            allowedFrom: [.preparing, .queued, .hashing, .running, .verifying]
+                        )
+                        throw CancellationError()
+                    } catch {
+                        _ = try? await store.transition(
+                            id: record.id,
+                            to: .failed,
+                            allowedFrom: [.preparing, .queued, .failed, .paused, .pausedAuthentication, .hashing, .running, .verifying],
+                            errorMessage: error.localizedDescription
+                        )
+                        throw error
                     }
-                    return result
-                } catch is CancellationError {
-                    _ = try? await store.transition(
-                        id: record.id,
-                        to: .paused,
-                        allowedFrom: [.preparing, .queued, .hashing, .running]
-                    )
-                    throw CancellationError()
-                } catch {
-                    _ = try? await store.transition(
-                        id: record.id,
-                        to: .failed,
-                        allowedFrom: [.preparing, .queued, .failed, .paused, .pausedAuthentication, .hashing, .running],
-                        errorMessage: error.localizedDescription
-                    )
-                    throw error
                 }
+            } catch {
+                // Wi-Fi 门禁等待期间被取消时，任务尚未进入 withReservedPermit，也必须释放预留名额。
+                await photoLibraryUploadLimiter.cancel(reservation)
+                throw error
             }
         }
     }
@@ -1348,12 +1393,19 @@ private final class TransferNetworkPathMonitor: @unchecked Sendable {
     }
 }
 
-// [修改] 上传和下载共用全局执行许可，所有任务先落盘，最多 5 个同时占用传输连接。
+// 普通上传和下载共用全局执行许可；相册视频使用同一限流器类型的独立实例保留五个上传名额。
 private actor TransferExecutionLimiter {
+    struct Reservation: Hashable, Sendable {
+        fileprivate let id: UUID
+    }
+
     private let maxConcurrent: Int
     private var activeCount = 0
     private var waiterOrder: [UUID] = []
     private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var reservedWaiterOrder: [UUID] = []
+    private var reservedPermits: Set<UUID> = []
+    private var reservedWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
 
     init(maxConcurrent: Int) {
         self.maxConcurrent = max(1, maxConcurrent)
@@ -1372,6 +1424,47 @@ private actor TransferExecutionLimiter {
             release()
             throw error
         }
+    }
+
+    // 调用方先取得排队凭证，后续即使在 detached task 中启动，也按登记顺序获得上传名额。
+    func reserve() -> Reservation {
+        let reservation = Reservation(id: UUID())
+        reservedWaiterOrder.append(reservation.id)
+        grantReservedPermitsIfPossible()
+        return reservation
+    }
+
+    func withReservedPermit<Value: Sendable>(
+        _ reservation: Reservation,
+        _ operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        do {
+            try Task.checkCancellation()
+            try await acquire(reservation)
+            do {
+                try Task.checkCancellation()
+                let value = try await operation()
+                release(reservation)
+                return value
+            } catch {
+                release(reservation)
+                throw error
+            }
+        } catch {
+            cancel(reservation)
+            throw error
+        }
+    }
+
+    func cancel(_ reservation: Reservation) {
+        let id = reservation.id
+        if reservedPermits.remove(id) != nil {
+            activeCount = max(0, activeCount - 1)
+            grantReservedPermitsIfPossible()
+            return
+        }
+        reservedWaiterOrder.removeAll { $0 == id }
+        reservedWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
     }
 
     private func acquire() async throws {
@@ -1397,6 +1490,23 @@ private actor TransferExecutionLimiter {
         }
     }
 
+    private func acquire(_ reservation: Reservation) async throws {
+        let id = reservation.id
+        guard reservedPermits.contains(id) || reservedWaiterOrder.contains(id) else {
+            throw CancellationError()
+        }
+        if reservedPermits.contains(id) { return }
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { continuation in
+                reservedWaiters[id] = continuation
+            }
+            try Task.checkCancellation()
+        } onCancel: {
+            Task { await self.cancel(reservation) }
+        }
+    }
+
     private func cancelWaiter(_ waiterID: UUID) {
         guard let continuation = waiters.removeValue(forKey: waiterID) else { return }
         continuation.resume(throwing: CancellationError())
@@ -1410,6 +1520,21 @@ private actor TransferExecutionLimiter {
             return
         }
         activeCount = max(0, activeCount - 1)
+    }
+
+    private func release(_ reservation: Reservation) {
+        guard reservedPermits.remove(reservation.id) != nil else { return }
+        activeCount = max(0, activeCount - 1)
+        grantReservedPermitsIfPossible()
+    }
+
+    private func grantReservedPermitsIfPossible() {
+        while activeCount < maxConcurrent, !reservedWaiterOrder.isEmpty {
+            let id = reservedWaiterOrder.removeFirst()
+            reservedPermits.insert(id)
+            activeCount += 1
+            reservedWaiters.removeValue(forKey: id)?.resume()
+        }
     }
 }
 

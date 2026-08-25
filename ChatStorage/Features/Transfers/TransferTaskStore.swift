@@ -36,6 +36,8 @@ enum TransferStatus: String, Codable, Equatable, Hashable, Sendable {
     case queued
     case hashing
     case running
+    // 客户端已提交全部字节，等待服务端完成最终完整性校验并返回确认。
+    case verifying
     case paused
     case pausedAuthentication
     case completed
@@ -45,7 +47,9 @@ enum TransferStatus: String, Codable, Equatable, Hashable, Sendable {
     var isTerminal: Bool { self == .completed || self == .failed || self == .cancelled }
     var isActive: Bool { !isTerminal }
     // [修改] “进行中”只包含实际排队或执行状态，暂停任务单独分组。
-    var isExecuting: Bool { self == .preparing || self == .queued || self == .hashing || self == .running }
+    var isExecuting: Bool {
+        self == .preparing || self == .queued || self == .hashing || self == .running || self == .verifying
+    }
 }
 
 struct TransferTaskRecord: Codable, Equatable, Identifiable, Sendable {
@@ -567,11 +571,12 @@ actor FileTransferTaskStore {
     private static func executionRank(_ status: TransferStatus) -> Int {
         switch status {
         case .running: 0
-        case .hashing: 1
-        case .preparing: 2
-        case .queued: 3
-        case .paused, .pausedAuthentication: 4
-        case .completed, .failed, .cancelled: 5
+        case .verifying: 1
+        case .hashing: 2
+        case .preparing: 3
+        case .queued: 4
+        case .paused, .pausedAuthentication: 5
+        case .completed, .failed, .cancelled: 6
         }
     }
 

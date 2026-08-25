@@ -87,6 +87,22 @@ struct DriveVideoPlaybackState: Equatable {
     }
 }
 
+// 网盘预览必须按播放器解析出的展示尺寸布局。把所有视频固定在 16:9 容器中会让竖屏相册视频
+// 在 AVPlayerLayer 的等比显示模式下被大幅缩小；仅在尚未拿到媒体尺寸时才使用 16:9 占位。
+enum DriveVideoLayout {
+    static let fallbackAspectRatio: CGFloat = 16 / 9
+
+    static func aspectRatio(for presentationSize: CGSize) -> CGFloat {
+        guard presentationSize.width.isFinite,
+              presentationSize.height.isFinite,
+              presentationSize.width > 0,
+              presentationSize.height > 0 else {
+            return fallbackAspectRatio
+        }
+        return presentationSize.width / presentationSize.height
+    }
+}
+
 enum DriveVideoPlaybackPhase: Equatable {
     case idle
     case loading
@@ -866,6 +882,7 @@ struct DrivePlaceholderView: View {
     @State private var renameValue = ""
     @State private var deleteEntry: DriveFileEntry?
     @State private var movingDirectory: DriveFileEntry?
+    @State private var movingFile: DriveFileEntry?
     @State private var detailEntry: DriveFileEntry?
     @State private var preview: DrivePreview?
     @State private var sharePayload: DriveSharePayload?
@@ -1113,6 +1130,20 @@ struct DrivePlaceholderView: View {
                     onSelect: { targetID in
                     movingDirectory = nil
                     Task { await model.moveDirectory(directory, targetParentId: targetID) }
+                    }
+                )
+            }
+            .sheet(item: $movingFile) { file in
+                DriveDirectoryPicker(
+                    title: "移动“\(file.name)”",
+                    roots: model.directoryRoots,
+                    excludedIDs: model.invalidFileMoveTargetIDs(for: file),
+                    selectedID: file.parentId,
+                    loadingDirectoryIDs: model.loadingDirectoryIDs,
+                    onExpand: { await model.loadDirectoryChildren(id: $0) },
+                    onSelect: { targetID in
+                        movingFile = nil
+                        Task { await model.moveFile(file, targetParentId: targetID) }
                     }
                 )
             }
@@ -1457,6 +1488,7 @@ struct DrivePlaceholderView: View {
         if entry.isFile {
             Button { Task { await openFile(entry) } } label: { Label("打开", systemImage: "arrow.up.right.square") }
             Button { Task { await downloadAndShare(entry) } } label: { Label("下载并分享", systemImage: "square.and.arrow.down") }
+            Button { movingFile = entry } label: { Label("移动到", systemImage: "folder") }
             Button { publishToDynamics(entry) } label: { Label("发布到动态", systemImage: "quote.bubble") }
         } else {
             Button { movingDirectory = entry } label: { Label("移动到", systemImage: "folder") }
@@ -2005,7 +2037,14 @@ private struct DrivePreviewView: View {
             if fullscreen || !showsFullscreenVideo {
                 DriveVideoSurface(player: player)
                     .frame(maxWidth: .infinity, maxHeight: fullscreen ? .infinity : nil)
-                    .aspectRatio(fullscreen ? nil : 16 / 9, contentMode: .fit)
+                    // 竖屏、方形和 4:3 视频均使用 AVPlayerItem 已处理旋转方向后的展示尺寸；
+                    // 不再被错误塞进固定的 16:9 画框。
+                    .aspectRatio(
+                        fullscreen ? nil : DriveVideoLayout.aspectRatio(
+                            for: player.currentItem?.presentationSize ?? .zero
+                        ),
+                        contentMode: .fit
+                    )
             } else {
                 // [修改] 全屏时卸载内嵌 AVPlayerLayer，避免同一播放器同时维持两份输出层。
                 Color.black.aspectRatio(16 / 9, contentMode: .fit)

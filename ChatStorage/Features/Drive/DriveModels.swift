@@ -248,6 +248,7 @@ struct MoveDirectoryRequest: Codable, Sendable { let dirId: Int64; let targetPar
 struct FileListRequest: Codable, Sendable { let dirId: Int64; let fileName: String; let pageNum: Int; let pageSize: Int }
 struct FileIDRequest: Codable, Sendable { let fileId: Int64 }
 struct RenameFileRequest: Codable, Sendable { let fileId: Int64; let newFileName: String }
+struct MoveFileRequest: Codable, Sendable { let fileId: Int64; let targetParentId: Int64 }
 
 private struct DriveCodingKey: CodingKey, Hashable {
     let stringValue: String

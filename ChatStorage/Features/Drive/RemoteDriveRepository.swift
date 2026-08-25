@@ -10,6 +10,7 @@ protocol DriveRepository: Sendable {
     func moveDirectory(id: Int64, targetParentId: Int64) async throws
     func fileDetail(id: Int64) async throws -> DriveFileEntry
     func renameFile(id: Int64, name: String) async throws
+    func moveFile(id: Int64, targetParentId: Int64) async throws
     func deleteFile(id: Int64) async throws
 }
 
@@ -20,6 +21,10 @@ extension DriveRepository {
     // [修改] 保留现有无搜索调用，统一转到服务端分页搜索接口。
     func listFiles(directoryId: Int64, page: Int, pageSize: Int) async throws -> DrivePage {
         try await listFiles(directoryId: directoryId, page: page, pageSize: pageSize, search: "")
+    }
+
+    func moveFile(id: Int64, targetParentId: Int64) async throws {
+        throw DriveRepositoryError.server("当前数据源不支持文件移动")
     }
 }
 
@@ -111,6 +116,12 @@ actor RemoteDriveRepository: DriveRepository {
     }
     func renameFile(id: Int64, name: String) async throws {
         try await fileOperation(Frame(type: .fileRenameRequest, payload: try ProtocolJSON.encoder().encode(RenameFileRequest(fileId: id, newFileName: name))))
+    }
+    func moveFile(id: Int64, targetParentId: Int64) async throws {
+        try await fileOperation(Frame(
+            type: .fileMoveRequest,
+            payload: try ProtocolJSON.encoder().encode(MoveFileRequest(fileId: id, targetParentId: targetParentId))
+        ))
     }
     func deleteFile(id: Int64) async throws {
         try await fileOperation(Frame(type: .fileDeleteRequest, payload: try ProtocolJSON.encoder().encode(FileIDRequest(fileId: id))))

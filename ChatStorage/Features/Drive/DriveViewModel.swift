@@ -425,12 +425,33 @@ final class DriveViewModel {
         }
     }
 
+    func moveFile(_ file: DriveFileEntry, targetParentId: Int64) async {
+        guard file.isFile else { return }
+        // 选择当前目录不产生任何文件系统或数据库写入。
+        guard targetParentId != file.parentId else { return }
+        do {
+            try await repository.moveFile(id: file.id, targetParentId: targetParentId)
+            // 文件移出当前目录后，不能让选择栏继续保留一个已不在当前列表中的 ID。
+            selectedEntryIDs.remove(file.id)
+            await refreshAfterMutation()
+        } catch {
+            guard !Self.isCancellation(error) else { return }
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? "移动文件失败"
+        }
+    }
+
     // [修改] 移动弹窗可能持有懒加载前的旧节点，排除目标必须回到当前目录树重新收集自身和全部子孙。
     func invalidMoveTargetIDs(for directory: DriveFileEntry) -> Set<Int64> {
         let latestDirectory = Self.path(to: directory.id, in: directoryRoots)?.last ?? directory
         var result = Set<Int64>()
         Self.collectDirectoryIDs(in: [latestDirectory], into: &result)
         return result
+    }
+
+    // 服务端将“移动到原目录”视为成功的空操作；客户端直接禁用它，避免用户误以为移动失败。
+    func invalidFileMoveTargetIDs(for file: DriveFileEntry) -> Set<Int64> {
+        guard file.isFile else { return [] }
+        return [file.parentId]
     }
 
     func loadDetail(for entry: DriveFileEntry) async -> DriveFileEntry? {

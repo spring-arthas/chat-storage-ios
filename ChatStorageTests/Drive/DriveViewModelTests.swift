@@ -96,6 +96,27 @@ final class DriveViewModelTests: XCTestCase {
         XCTAssertEqual(state.sliderUpperBound, 1)
     }
 
+    func testVideoPreviewUsesPlayerPresentationAspectRatio() {
+        XCTAssertEqual(
+            DriveVideoLayout.aspectRatio(for: CGSize(width: 1_080, height: 1_920)),
+            9 / 16,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            DriveVideoLayout.aspectRatio(for: CGSize(width: 1_440, height: 1_080)),
+            4 / 3,
+            accuracy: 0.0001
+        )
+    }
+
+    func testVideoPreviewUsesPlaceholderAspectRatioUntilPresentationSizeIsReady() {
+        XCTAssertEqual(
+            DriveVideoLayout.aspectRatio(for: .zero),
+            DriveVideoLayout.fallbackAspectRatio,
+            accuracy: 0.0001
+        )
+    }
+
     // [修改] 拖动过程中只更新界面，松手后才向播放器发送一次 seek，避免连续 Range 请求和状态回跳。
     func testVideoPlaybackControllerSeeksOnceWhenScrubbingEnds() async throws {
         let factory = TestDriveVideoPlayerEngineFactory()

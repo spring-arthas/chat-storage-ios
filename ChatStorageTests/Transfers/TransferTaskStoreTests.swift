@@ -159,6 +159,79 @@ final class TransferTaskStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: sourceRoot.path))
     }
 
+    func testUploadShowsServerVerificationAfterLastByteUntilAcknowledgement() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceURL = root.appendingPathComponent("clip.mp4")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("video-data".utf8).write(to: sourceURL)
+        let store = FileTransferTaskStore(fileURL: root.appendingPathComponent("tasks.json"))
+        let engine = FinalizationHoldingUploadEngine()
+        let manager = TransferManager(
+            configuration: try ServerConfiguration(host: "127.0.0.1"),
+            identity: TransferIdentity(userId: 7, username: "alice", transferToken: "secret-token"),
+            store: store,
+            uploadEngine: engine,
+            sourceRootURL: root.appendingPathComponent("sources", isDirectory: true)
+        )
+
+        let upload = Task { try await manager.upload(sourceURL: sourceURL, targetDirectoryId: 12) }
+        await engine.waitUntilFinalProgressWasReported()
+
+        let verifying = await waitForOnlyTask(status: .verifying, store: store)
+        XCTAssertEqual(verifying?.progress, 1)
+        XCTAssertEqual(verifying?.transferredBytes, verifying?.fileSize)
+
+        await engine.acknowledgeCompletion()
+        _ = await upload.result
+        let completed = await waitForOnlyTask(status: .completed, store: store)
+        XCTAssertEqual(completed?.status, .completed)
+    }
+
+    // 相册视频同样必须走独立任务和独立上传连接：前五个并发，剩余任务保留在持久队列等待许可。
+    func testPhotoLibraryVideoUploadsRunFiveAtOnceAndQueueRemaining() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = FileTransferTaskStore(fileURL: root.appendingPathComponent("tasks.json"))
+        let engine = LimitedPhotoLibraryUploadEngine()
+        let manager = TransferManager(
+            configuration: try ServerConfiguration(host: "127.0.0.1"),
+            identity: TransferIdentity(userId: 7, username: "alice", transferToken: "secret-token"),
+            store: store,
+            photoLibraryUploadEngine: engine,
+            sourceRootURL: root.appendingPathComponent("sources", isDirectory: true),
+            maxConcurrentTransfers: 5
+        )
+
+        var preparations: [PhotoLibraryUploadPreparation] = []
+        for index in 0..<7 {
+            preparations.append(try await manager.beginPhotoLibraryUpload(
+                fileName: "视频 \(index).mov",
+                photoLibraryAssetIdentifier: "photo-\(index)",
+                targetDirectoryId: 12
+            ))
+        }
+        for preparation in preparations {
+            try await manager.startPhotoLibraryVideoUpload(preparation)
+        }
+
+        await engine.waitForCallCount(5)
+        try await Task.sleep(for: .milliseconds(80))
+        let maximumConcurrent = await engine.maximumConcurrent
+        let startedAssetIdentifiers = await engine.startedAssetIdentifiers
+        let records = await store.all()
+        let queuedCount = records.filter { $0.status == .queued }.count
+        let verifyingCount = records.filter { $0.status == .verifying }.count
+        XCTAssertEqual(maximumConcurrent, 5)
+        XCTAssertEqual(startedAssetIdentifiers, ["photo-0", "photo-1", "photo-2", "photo-3", "photo-4"])
+        XCTAssertEqual(queuedCount, 2)
+        XCTAssertEqual(verifyingCount, 5)
+
+        await engine.finishAll()
+        for preparation in preparations {
+            let completed = await waitForTask(id: preparation.taskId, status: .completed, store: store)
+            XCTAssertEqual(completed?.status, .completed)
+        }
+    }
+
     // [修改] 系统标记 bookmark 过期后必须重新生成可解析的新数据；未过期时不做多余写入。
     func testStaleDestinationBookmarkIsRefreshedForTheSameDirectory() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1527,6 +1600,14 @@ final class TransferTaskStoreTests: XCTestCase {
         return await store.task(id: id)
     }
 
+    private func waitForOnlyTask(status: TransferStatus, store: FileTransferTaskStore) async -> TransferTaskRecord? {
+        for _ in 0..<100 {
+            if let task = await store.all().first, task.status == status { return task }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return await store.all().first
+    }
+
     private func temporaryStoreURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -1576,6 +1657,37 @@ private struct SuccessfulPhotoLibraryUploadEngine: PhotoLibraryUploading {
         try await onMetadataComputed(.init(fileSize: 32 * 1024 * 1024, md5: "photo-md5"))
         await onProgress(.init(transferredBytes: 32 * 1024 * 1024, totalBytes: 32 * 1024 * 1024))
         return .init(fileId: 902, uploadedBytes: 32 * 1024 * 1024)
+    }
+}
+
+private actor FinalizationHoldingUploadEngine: FileUploading {
+    private var hasReportedFinalProgress = false
+    private var finalProgressWaiter: CheckedContinuation<Void, Never>?
+    private var completionWaiter: CheckedContinuation<Void, Never>?
+
+    func upload(
+        command: UploadCommand,
+        sourceURL: URL,
+        onMD5Computed: @escaping @Sendable (String) async throws -> Void,
+        onProgress: @escaping @Sendable (TransferProgress) async -> Void
+    ) async throws -> UploadResult {
+        try await onMD5Computed("e807f1fcf82d132f9bb018ca6738a19f")
+        await onProgress(.init(transferredBytes: 10, totalBytes: 10))
+        hasReportedFinalProgress = true
+        finalProgressWaiter?.resume()
+        finalProgressWaiter = nil
+        await withCheckedContinuation { completionWaiter = $0 }
+        return .init(fileId: 903, uploadedBytes: 10)
+    }
+
+    func waitUntilFinalProgressWasReported() async {
+        guard !hasReportedFinalProgress else { return }
+        await withCheckedContinuation { finalProgressWaiter = $0 }
+    }
+
+    func acknowledgeCompletion() {
+        completionWaiter?.resume()
+        completionWaiter = nil
     }
 }
 
@@ -1652,6 +1764,61 @@ private actor LimitedUploadEngine: FileUploading {
         let currentWaiters = waiters
         waiters.removeAll()
         currentWaiters.forEach { $0.resume() }
+    }
+}
+
+private actor LimitedPhotoLibraryUploadEngine: PhotoLibraryUploading {
+    private var currentConcurrent = 0
+    private(set) var maximumConcurrent = 0
+    private(set) var startedAssetIdentifiers: [String] = []
+    private var callCountWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var finishWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isFinished = false
+
+    func uploadPhotoLibraryVideo(
+        command: UploadCommand,
+        assetLocalIdentifier: String,
+        fileName: String,
+        fileType: String,
+        knownFileSize: Int64?,
+        onMetadataComputed: @escaping @Sendable (PhotoLibraryUploadMetadata) async throws -> Void,
+        onProgress: @escaping @Sendable (TransferProgress) async -> Void
+    ) async throws -> UploadResult {
+        currentConcurrent += 1
+        maximumConcurrent = max(maximumConcurrent, currentConcurrent)
+        startedAssetIdentifiers.append(assetLocalIdentifier)
+        resumeSatisfiedCallCountWaiters()
+        try await onMetadataComputed(.init(fileSize: 1_024, md5: "digest-\(command.taskId)"))
+        await onProgress(.init(transferredBytes: 1_024, totalBytes: 1_024))
+        if !isFinished {
+            await withCheckedContinuation { finishWaiters.append($0) }
+        }
+        currentConcurrent -= 1
+        return .init(fileId: Int64.random(in: 1...10_000), uploadedBytes: 1_024)
+    }
+
+    func waitForCallCount(_ count: Int) async {
+        guard currentConcurrent < count else { return }
+        await withCheckedContinuation { callCountWaiters.append((count, $0)) }
+    }
+
+    func finishAll() {
+        isFinished = true
+        let waiters = finishWaiters
+        finishWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func resumeSatisfiedCallCountWaiters() {
+        var remaining: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+        for waiter in callCountWaiters {
+            if currentConcurrent >= waiter.count {
+                waiter.continuation.resume()
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        callCountWaiters = remaining
     }
 }
 

@@ -46,6 +46,7 @@ enum FrameType: UInt8, CaseIterable, Sendable {
     case userSessionResumeRequest = 0x46
     case heartbeatRequest = 0x47
     case heartbeatResponse = 0x48
+    case fileMoveRequest = 0x49
 
     case chatSendRequest = 0x50
     case chatPush = 0x51

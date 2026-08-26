@@ -143,6 +143,8 @@ struct TransferCenterView: View {
                 }
             }
         }
+        // [修改] List 行内按钮只响应按钮自身，点击文件名、进度条等任务内容不得触发暂停/取消。
+        .buttonStyle(.borderless)
     }
 
     private func statusText(_ status: TransferStatus) -> String {

@@ -22,8 +22,8 @@ final class TransferCenterViewModel {
     private(set) var tasks: [TransferTaskRecord] = []
     private(set) var errorMessage: String?
     var directionFilter: TransferDirectionFilter = .all
-    // [修改] 默认只展示「待上传 + 上传中」，符合传输中心的即时关注点。
-    var statusFilter: TransferStatusFilter = .active
+    // [修改] 默认展示全部状态，暂停或完成后仍保留在传输中心；用户仍可通过状态菜单主动筛选。
+    var statusFilter: TransferStatusFilter = .all
 
     private let store: FileTransferTaskStore
     private let manager: (any TransferManaging)?

@@ -76,6 +76,20 @@ final class TransferCenterViewModelTests: XCTestCase {
         XCTAssertEqual(model.filteredTasks.map(\.id), ["running"])
     }
 
+    // [修改] 点击暂停按钮后，任务仍留在默认列表，不能被误认为删除。
+    func testDefaultFilterKeepsPausedAndCompletedTasksVisible() async throws {
+        let store = FileTransferTaskStore(fileURL: temporaryTransferStoreURL())
+        let paused = TransferTaskRecord.fixture(id: "paused", direction: .upload, status: .paused)
+        let completed = TransferTaskRecord.fixture(id: "completed", direction: .download, status: .completed)
+        try await store.insert(paused)
+        try await store.insert(completed)
+        let model = TransferCenterViewModel(store: store, manager: TransferManagerSpy(), userId: 7)
+
+        await model.load()
+
+        XCTAssertEqual(model.filteredTasks.map(\.id), [paused.id, completed.id])
+    }
+
     func testCancelAndCancelAllDelegateToManager() async throws {
         let store = FileTransferTaskStore(fileURL: temporaryTransferStoreURL())
         let task = TransferTaskRecord.fixture(id: "running", direction: .upload, status: .running)

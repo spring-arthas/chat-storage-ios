@@ -103,6 +103,118 @@ enum DriveVideoLayout {
     }
 }
 
+// [修改] 图片预览按可用容器等比缩放，避免使用原图尺寸导致预览超出屏幕后只能拖动查看。
+enum DriveImagePreviewLayout {
+    static let defaultInset: CGFloat = 0
+
+    static func fittedSize(
+        imageSize: CGSize,
+        containerSize: CGSize,
+        inset: CGFloat
+    ) -> CGSize {
+        guard imageSize.width.isFinite,
+              imageSize.height.isFinite,
+              imageSize.width > 0,
+              imageSize.height > 0 else {
+            return .zero
+        }
+
+        let padding = max(inset, 0)
+        let availableWidth = max(containerSize.width - padding * 2, 1)
+        let availableHeight = max(containerSize.height - padding * 2, 1)
+        let scale = min(
+            availableWidth / imageSize.width,
+            availableHeight / imageSize.height
+        )
+
+        return CGSize(
+            width: imageSize.width * scale,
+            height: imageSize.height * scale
+        )
+    }
+}
+
+// [修改] 图片预览支持捏合和双击放大，但初始比例始终不小于完整预览所需的 1 倍。
+struct DriveImagePreviewZoomState: Equatable {
+    static let minimumScale: CGFloat = 1
+    static let maximumScale: CGFloat = 4
+
+    private(set) var scale: CGFloat = minimumScale
+
+    mutating func applyMagnification(_ magnification: CGFloat) {
+        guard magnification.isFinite, magnification > 0 else { return }
+        scale = min(max(scale * magnification, Self.minimumScale), Self.maximumScale)
+    }
+
+    mutating func toggle() {
+        scale = scale > Self.minimumScale ? Self.minimumScale : 2
+    }
+
+    mutating func reset() {
+        scale = Self.minimumScale
+    }
+}
+
+// [修改] 大图预览视频按容器宽度计算首帧尺寸，减少左右和顶部的无效留白。
+// [修改] 同时受容器高度约束：竖屏视频在小屏/短屏上会收窄到刚好放得下，不再溢出屏幕。
+enum DriveVideoPreviewLayout {
+    static func filledSize(mediaSize: CGSize, containerSize: CGSize) -> CGSize {
+        let aspectRatio = DriveVideoLayout.aspectRatio(for: mediaSize)
+        let availableWidth = max(containerSize.width, 1)
+        let availableHeight = max(containerSize.height, 1)
+        // 先按宽度铺满；若按宽度铺满后高度超过可用高度，则收紧到高度刚好容纳，保持等比。
+        let widthByHeight = availableHeight * aspectRatio
+        let width = min(availableWidth, widthByHeight)
+        return CGSize(width: width, height: width / aspectRatio)
+    }
+}
+
+// [修改] 网格媒体缩略图必须占满卡片宽度，避免卡片顶部出现大块无效灰色区域。
+enum DriveGridThumbnailLayout {
+    static func sideLength(for cardWidth: CGFloat) -> CGFloat {
+        guard cardWidth.isFinite else { return 0 }
+        return max(cardWidth, 0)
+    }
+}
+
+// [修改] 列表卡片高度只包含缩略图和一次上下内边距，不能再叠加外层 padding 拉出大块空白。
+enum DriveListRowLayout {
+    static let verticalPadding: CGFloat = 12
+
+    static func cardHeight(forThumbnailSide thumbnailSide: CGFloat) -> CGFloat {
+        max(thumbnailSide, 0) + verticalPadding * 2
+    }
+}
+
+// [修改] 播放器异步解析出视频尺寸后保存最新值，驱动预览从 16:9 占位切换到真实首帧比例。
+struct DriveVideoPresentationSizeState: Equatable {
+    private(set) var size: CGSize = .zero
+
+    mutating func update(with size: CGSize) {
+        guard size.width.isFinite,
+              size.height.isFinite,
+              size.width > 0,
+              size.height > 0 else {
+            return
+        }
+        self.size = size
+    }
+}
+
+// [修改] 文件卡片日期固定为机器可读的年月日和分钟格式，不再受系统语言影响。
+enum DriveDateFormatter {
+    static func string(for value: Int64?, timeZone: TimeZone = .current) -> String {
+        guard let value else { return "" }
+        let seconds = value > 10_000_000_000 ? Double(value) / 1_000 : Double(value)
+        let formatter = Foundation.DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter.string(from: Date(timeIntervalSince1970: seconds))
+    }
+}
+
 enum DriveVideoPlaybackPhase: Equatable {
     case idle
     case loading
@@ -143,6 +255,7 @@ final class DriveVideoPlaybackController {
     private(set) var phase: DriveVideoPlaybackPhase = .idle
     private(set) var isScrubbing = false
     private(set) var player: AVPlayer?
+    private(set) var presentationSizeState = DriveVideoPresentationSizeState()
 
     @ObservationIgnored private let engineFactory: any DriveVideoPlayerEngineFactory
     @ObservationIgnored private let refreshPlayback: (@MainActor () async throws -> MediaPlayback)?
@@ -161,6 +274,7 @@ final class DriveVideoPlaybackController {
     @ObservationIgnored private var resumesAfterScrubbing = false
     @ObservationIgnored private var failureRefreshAttempted = false
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    @ObservationIgnored private var presentationSizeObservation: NSKeyValueObservation?
 
     init(
         url: URL,
@@ -320,9 +434,11 @@ final class DriveVideoPlaybackController {
         commandGeneration &+= 1
         refreshTask?.cancel()
         refreshTask = nil
+        presentationSizeObservation = nil
         engine?.invalidate()
         engine = nil
         player = nil
+        presentationSizeState = DriveVideoPresentationSizeState()
         playbackState.stop()
         resumesAfterScrubbing = false
         failureRefreshAttempted = false
@@ -442,6 +558,7 @@ final class DriveVideoPlaybackController {
             engine?.invalidate()
             engine = nextEngine
             player = nextEngine.player
+            observePresentationSize(of: nextEngine.player?.currentItem)
             nextEngine.setEventHandler { [weak self] event in
                 guard let self,
                       self.lifecycleGeneration == lifecycle,
@@ -470,6 +587,25 @@ final class DriveVideoPlaybackController {
             let base = error.localizedDescription.isEmpty ? "视频加载失败" : error.localizedDescription
             phase = .failed("\(base)\n\(url.absoluteString)")
         }
+    }
+
+    private func observePresentationSize(of item: AVPlayerItem?) {
+        presentationSizeObservation = nil
+        presentationSizeState = DriveVideoPresentationSizeState()
+        guard let item else { return }
+        updatePresentationSize(item.presentationSize)
+        presentationSizeObservation = item.observe(\AVPlayerItem.presentationSize, options: [.initial, .new]) { [weak self] item, _ in
+            let size = item.presentationSize
+            Task { @MainActor [weak self] in
+                self?.updatePresentationSize(size)
+            }
+        }
+    }
+
+    private func updatePresentationSize(_ size: CGSize) {
+        var nextState = presentationSizeState
+        nextState.update(with: size)
+        presentationSizeState = nextState
     }
 
     private func seekEngine(to seconds: TimeInterval) async {
@@ -1091,14 +1227,14 @@ struct DrivePlaceholderView: View {
                 Button("取消", role: .cancel) { deleteEntry = nil }
                 Button("删除", role: .destructive) { deleteSelectedEntry() }
             } message: {
-                // [修改] 目录删除会递归清理其中全部文件，确认文案必须把影响范围说清楚。
-                Text("删除后无法恢复；如果是目录，目录内全部文件也会删除。确定删除“\(deleteEntry?.name ?? "此项目")”？")
+                // [修改] 目录删除会递归清理所有子目录和文件，确认文案必须把影响范围说清楚。
+                Text("删除后无法恢复；如果是目录，目录及所有子目录、文件也会删除。确定删除“\(deleteEntry?.name ?? "此项目")”？")
             }
             .alert("确认批量删除", isPresented: $showsBatchDeleteConfirmation) {
                 Button("取消", role: .cancel) {}
                 Button("删除", role: .destructive) { deleteSelectedEntries() }
             } message: {
-                Text("将删除已选择的 \(model.selectedEntries.count) 个项目；所选目录内的全部文件也会删除。失败项目会保留，方便重试。")
+                Text("将删除已选择的 \(model.selectedEntries.count) 个项目；所选目录及所有子目录、文件也会删除。失败时会保留选择，方便重试。")
             }
             .alert("网盘操作失败", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.clearError() } })) {
                 Button("知道了") { model.clearError() }
@@ -1406,19 +1542,26 @@ struct DrivePlaceholderView: View {
     }
 
     private func listRow(for entry: DriveFileEntry) -> some View {
-        Button { handleTap(entry) } label: {
+        let thumbnailSide: CGFloat = entry.isFile ? 76 : 52
+        return Button { handleTap(entry) } label: {
             HStack(spacing: 12) {
-                thumbnailView(for: entry, size: 42)
-                VStack(alignment: .leading, spacing: 4) {
+                thumbnailView(for: entry, size: thumbnailSide)
+                VStack(alignment: .leading, spacing: 8) {
                     Text(entry.name).foregroundStyle(.primary).lineLimit(1)
-                    Text(entrySubtitle(entry)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    entryMetadata(for: entry)
                 }
                 Spacer(minLength: 4)
                 if isSelecting { selectionMark(for: entry) }
                 else if !entry.isFile { Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary) }
             }
-            .padding(.vertical, 10)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: DriveListRowLayout.cardHeight(forThumbnailSide: thumbnailSide),
+                alignment: .leading
+            )
+            .padding(.horizontal, 12)
             .contentShape(Rectangle())
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("drive.entry.\(entry.id)")
@@ -1428,28 +1571,57 @@ struct DrivePlaceholderView: View {
             Button { beginRename(entry) } label: { Label("重命名", systemImage: "pencil") }.tint(AppTheme.documentBlue)
         }
         .task(id: thumbnailKey(for: entry)) { await loadThumbnail(for: entry) }
-        .overlay(alignment: .bottom) { Divider() }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
     }
 
     private func gridCell(for entry: DriveFileEntry) -> some View {
         Button { handleTap(entry) } label: {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 0) {
                 ZStack(alignment: .topTrailing) {
-                    thumbnailView(for: entry, size: 112)
-                        .frame(maxWidth: .infinity)
+                    if entry.isFile {
+                        gridMediaThumbnail(for: entry)
+                    } else {
+                        thumbnailView(for: entry, size: 112)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 10)
+                    }
                     if isSelecting { selectionMark(for: entry).padding(6) }
                 }
-                Text(entry.name).font(.subheadline).lineLimit(2).foregroundStyle(.primary)
-                Text(entrySubtitle(entry)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(entry.name).font(.subheadline).lineLimit(2).foregroundStyle(.primary)
+                    entryMetadata(for: entry)
+                }
+                .padding(10)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10)
             .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("drive.entry.\(entry.id)")
         .contextMenu { entryActions(for: entry) }
         .task(id: thumbnailKey(for: entry)) { await loadThumbnail(for: entry) }
+    }
+
+    @ViewBuilder
+    private func entryMetadata(for entry: DriveFileEntry) -> some View {
+        if entry.isFile {
+            HStack(spacing: 8) {
+                Text(ByteCountFormatter.string(fromByteCount: entry.size ?? 0, countStyle: .file))
+                Spacer(minLength: 4)
+                let date = formatDate(entry.modifiedAt ?? entry.createdAt)
+                if !date.isEmpty { Text(date) }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        } else {
+            Text(entrySubtitle(entry))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
     }
 
     private func selectionBarContent() -> some View {
@@ -1503,6 +1675,14 @@ struct DrivePlaceholderView: View {
     }
 
     private func thumbnailView(for entry: DriveFileEntry, size: CGFloat) -> some View {
+        thumbnailContent(for: entry)
+            .frame(width: size, height: size)
+            .background(Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    @ViewBuilder
+    private func thumbnailContent(for entry: DriveFileEntry) -> some View {
         Group {
             if let image = thumbnails[thumbnailKey(for: entry)] {
                 Image(uiImage: image)
@@ -1514,9 +1694,17 @@ struct DrivePlaceholderView: View {
                     .foregroundStyle(entry.isFile ? AppTheme.documentBlue : AppTheme.primaryGreen)
             }
         }
-        .frame(width: size, height: size)
-        .background(Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func gridMediaThumbnail(for entry: DriveFileEntry) -> some View {
+        GeometryReader { proxy in
+            let side = DriveGridThumbnailLayout.sideLength(for: proxy.size.width)
+            thumbnailContent(for: entry)
+                .frame(width: side, height: side)
+                .background(Color(.tertiarySystemBackground))
+                .clipped()
+        }
+        .aspectRatio(1, contentMode: .fit)
     }
 
     private func selectionMark(for entry: DriveFileEntry) -> some View {
@@ -1874,9 +2062,7 @@ struct DrivePlaceholderView: View {
     }
 
     private func formatDate(_ value: Int64?) -> String {
-        guard let value else { return "" }
-        let seconds = value > 10_000_000_000 ? Double(value) / 1_000 : Double(value)
-        return Date(timeIntervalSince1970: seconds).formatted(date: .abbreviated, time: .shortened)
+        DriveDateFormatter.string(for: value)
     }
 
     private func isImage(_ entry: DriveFileEntry) -> Bool {
@@ -1949,6 +2135,10 @@ private struct DrivePreviewView: View {
     @State private var showsFullscreenVideo = false
     @State private var isPreparingShare = false
     @State private var sharePayload: DriveSharePayload?
+    @State private var imageZoom = DriveImagePreviewZoomState()
+    @State private var imageOffset: CGSize = .zero
+    @GestureState private var liveImageMagnification: CGFloat = 1
+    @GestureState private var liveImageOffset: CGSize = .zero
 
     init(preview: DrivePreview) {
         self.preview = preview
@@ -1986,9 +2176,12 @@ private struct DrivePreviewView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.black.opacity(preview.kind == .image ? 0.04 : 0))
+            // [修改] 图片和视频预览统一使用黑底，减少媒体首帧周围的灰色留白。
+            .background(Color.black)
             .navigationTitle(preview.entry.name)
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.black, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
             // [修改] 预览容器不能覆盖播放、停止、进度和全屏等子控件的独立标识。
             .overlay(alignment: .topLeading) {
                 Color.clear
@@ -2035,16 +2228,16 @@ private struct DrivePreviewView: View {
     private func videoContent(player: AVPlayer, fullscreen: Bool) -> some View {
         VStack(spacing: 0) {
             if fullscreen || !showsFullscreenVideo {
-                DriveVideoSurface(player: player)
-                    .frame(maxWidth: .infinity, maxHeight: fullscreen ? .infinity : nil)
-                    // 竖屏、方形和 4:3 视频均使用 AVPlayerItem 已处理旋转方向后的展示尺寸；
-                    // 不再被错误塞进固定的 16:9 画框。
-                    .aspectRatio(
-                        fullscreen ? nil : DriveVideoLayout.aspectRatio(
-                            for: player.currentItem?.presentationSize ?? .zero
-                        ),
-                        contentMode: .fit
+                if fullscreen {
+                    DriveVideoSurface(player: player, videoGravity: .resizeAspectFill)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                } else {
+                    DrivePreviewVideoSurface(
+                        player: player,
+                        presentationSize: videoController.presentationSizeState.size
                     )
+                }
             } else {
                 // [修改] 全屏时卸载内嵌 AVPlayerLayer，避免同一播放器同时维持两份输出层。
                 Color.black.aspectRatio(16 / 9, contentMode: .fit)
@@ -2193,27 +2386,86 @@ private struct DrivePreviewView: View {
     @ViewBuilder
     private var imageContent: some View {
         if let image = UIImage(contentsOfFile: preview.url.path) {
-            ScrollView([.horizontal, .vertical]) {
-                Image(uiImage: image).resizable().scaledToFit().padding()
+            GeometryReader { proxy in
+                let inset = DriveImagePreviewLayout.defaultInset
+                let fittedSize = DriveImagePreviewLayout.fittedSize(
+                    imageSize: image.size,
+                    containerSize: proxy.size,
+                    inset: inset
+                )
+
+                ZStack {
+                    Image(uiImage: image)
+                        .resizable()
+                        .frame(width: fittedSize.width, height: fittedSize.height)
+                        .scaleEffect(imageZoom.scale * liveImageMagnification)
+                        .offset(
+                            x: imageOffset.width + liveImageOffset.width,
+                            y: imageOffset.height + liveImageOffset.height
+                        )
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .contentShape(Rectangle())
+                .gesture(imagePreviewGesture)
+                .onTapGesture(count: 2) {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        imageZoom.toggle()
+                        if imageZoom.scale == DriveImagePreviewZoomState.minimumScale {
+                            imageOffset = .zero
+                        }
+                    }
+                }
             }
+            .accessibilityIdentifier("drive.image-preview")
+            .clipped()
         } else {
             ContentUnavailableView("无法预览图片", systemImage: "photo", description: Text(preview.entry.name))
         }
+    }
+
+    private var imagePreviewGesture: some Gesture {
+        SimultaneousGesture(
+            MagnificationGesture()
+                .updating($liveImageMagnification) { value, state, _ in state = value }
+                .onEnded { value in
+                    imageZoom.applyMagnification(value)
+                    if imageZoom.scale == DriveImagePreviewZoomState.minimumScale {
+                        imageOffset = .zero
+                    }
+                },
+            DragGesture()
+                .updating($liveImageOffset) { value, state, _ in
+                    guard imageZoom.scale > DriveImagePreviewZoomState.minimumScale else { return }
+                    state = value.translation
+                }
+                .onEnded { value in
+                    guard imageZoom.scale > DriveImagePreviewZoomState.minimumScale else { return }
+                    imageOffset.width += value.translation.width
+                    imageOffset.height += value.translation.height
+                }
+        )
     }
 }
 
 // [修改] 网盘和聊天视频共用无系统控件的 AVPlayerLayer，播放、停止、进度和全屏由 SwiftUI 控制条管理。
 struct SecureVideoSurface: UIViewRepresentable {
     let player: AVPlayer
+    let videoGravity: AVLayerVideoGravity
+
+    init(player: AVPlayer, videoGravity: AVLayerVideoGravity = .resizeAspect) {
+        self.player = player
+        self.videoGravity = videoGravity
+    }
 
     func makeUIView(context: Context) -> PlayerView {
         let view = PlayerView()
-        view.playerLayer.videoGravity = .resizeAspect
+        view.playerLayer.videoGravity = videoGravity
         view.playerLayer.player = player
         return view
     }
 
     func updateUIView(_ view: PlayerView, context: Context) {
+        view.playerLayer.videoGravity = videoGravity
         view.playerLayer.player = player
     }
 
@@ -2228,6 +2480,29 @@ struct SecureVideoSurface: UIViewRepresentable {
 }
 
 private typealias DriveVideoSurface = SecureVideoSurface
+
+// [修改] 网盘视频预览单独使用铺满宽度的首帧容器，聊天和动态视频继续使用原始等比显示。
+private struct DrivePreviewVideoSurface: View {
+    let player: AVPlayer
+    let presentationSize: CGSize
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = DriveVideoPreviewLayout.filledSize(
+                mediaSize: presentationSize,
+                containerSize: proxy.size
+            )
+            DriveVideoSurface(player: player, videoGravity: .resizeAspectFill)
+                .frame(width: size.width, height: size.height, alignment: .top)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .clipped()
+        }
+        .aspectRatio(
+            DriveVideoLayout.aspectRatio(for: presentationSize),
+            contentMode: .fit
+        )
+    }
+}
 
 // [修改] iOS 普通文件使用系统 Quick Look，支持 PDF、Office、文本、压缩包等系统可识别格式。
 private struct DriveQuickLookPreview: UIViewControllerRepresentable {

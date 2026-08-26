@@ -117,6 +117,121 @@ final class DriveViewModelTests: XCTestCase {
         )
     }
 
+    func testImagePreviewFitsWholeImageInsideAvailableContainer() {
+        let fitted = DriveImagePreviewLayout.fittedSize(
+            imageSize: CGSize(width: 1_200, height: 2_400),
+            containerSize: CGSize(width: 390, height: 780),
+            inset: DriveImagePreviewLayout.defaultInset
+        )
+
+        XCTAssertEqual(fitted.width, 390, accuracy: 0.1)
+        XCTAssertEqual(fitted.height, 780, accuracy: 0.1)
+    }
+
+    // [修改] 图片预览不能依赖某一台 iPhone 的固定尺寸；小屏、标准屏和大屏都要按实际可用区域完整等比展示。
+    func testImagePreviewAdaptsToMultipleIPhoneViewportsWithoutCropping() {
+        let portraitImage = CGSize(width: 1_200, height: 2_400)
+        let landscapeImage = CGSize(width: 2_400, height: 1_200)
+        let viewports = [
+            CGSize(width: 375, height: 667),
+            CGSize(width: 393, height: 852),
+            CGSize(width: 430, height: 932)
+        ]
+
+        for viewport in viewports {
+            let portrait = DriveImagePreviewLayout.fittedSize(
+                imageSize: portraitImage,
+                containerSize: viewport,
+                inset: DriveImagePreviewLayout.defaultInset
+            )
+            let landscape = DriveImagePreviewLayout.fittedSize(
+                imageSize: landscapeImage,
+                containerSize: viewport,
+                inset: DriveImagePreviewLayout.defaultInset
+            )
+
+            XCTAssertLessThanOrEqual(portrait.width, viewport.width)
+            XCTAssertLessThanOrEqual(portrait.height, viewport.height)
+            XCTAssertEqual(portrait.width / portrait.height, 0.5, accuracy: 0.0001)
+            XCTAssertLessThanOrEqual(landscape.width, viewport.width)
+            XCTAssertLessThanOrEqual(landscape.height, viewport.height)
+            XCTAssertEqual(landscape.width / landscape.height, 2, accuracy: 0.0001)
+        }
+    }
+
+    func testImagePreviewZoomCanEnlargeButNeverShrinkBelowCompletePreview() {
+        var zoom = DriveImagePreviewZoomState()
+
+        zoom.applyMagnification(2.5)
+        XCTAssertEqual(zoom.scale, 2.5, accuracy: 0.001)
+
+        zoom.applyMagnification(0.1)
+        XCTAssertEqual(zoom.scale, 1, accuracy: 0.001)
+    }
+
+    func testVideoPreviewFillsContainerWidthWhilePreservingFirstFrameRatio() {
+        let fitted = DriveVideoPreviewLayout.filledSize(
+            mediaSize: CGSize(width: 1_920, height: 1_080),
+            containerSize: CGSize(width: 390, height: 780)
+        )
+
+        XCTAssertEqual(fitted.width, 390, accuracy: 0.1)
+        XCTAssertEqual(fitted.height, 219.375, accuracy: 0.1)
+    }
+
+    // [修改] 竖屏视频在小屏/短屏上不能溢出屏幕；高度受限时应收窄并保持等比，宽度铺满前提不破坏。
+    func testVideoPreviewPortraitFitsSmallScreenHeightWithoutOverflow() {
+        let portrait = CGSize(width: 1_080, height: 1_920)
+        let viewports = [
+            CGSize(width: 375, height: 667),
+            CGSize(width: 320, height: 480),
+            CGSize(width: 430, height: 932)
+        ]
+        for viewport in viewports {
+            let fitted = DriveVideoPreviewLayout.filledSize(
+                mediaSize: portrait,
+                containerSize: viewport
+            )
+            XCTAssertLessThanOrEqual(fitted.width, viewport.width, "宽不应超过容器宽")
+            XCTAssertLessThanOrEqual(fitted.height, viewport.height, "高不应超过容器高")
+            XCTAssertEqual(fitted.width / fitted.height, 0.5625, accuracy: 0.0001, "必须保持竖屏视频等比")
+        }
+    }
+
+    func testGridMediaThumbnailUsesTheEntireCardWidth() {
+        XCTAssertEqual(
+            DriveGridThumbnailLayout.sideLength(for: 171),
+            171,
+            accuracy: 0.1
+        )
+    }
+
+    func testListFileCardHeightOnlyAddsVerticalPaddingOnce() {
+        XCTAssertEqual(
+            DriveListRowLayout.cardHeight(forThumbnailSide: 76),
+            100,
+            accuracy: 0.1
+        )
+    }
+
+    func testVideoPresentationSizeStateReplacesThePlaceholderAfterMetadataLoads() {
+        var state = DriveVideoPresentationSizeState()
+
+        state.update(with: CGSize(width: 1_080, height: 1_920))
+
+        XCTAssertEqual(state.size, CGSize(width: 1_080, height: 1_920))
+    }
+
+    func testDriveCardDateUsesFixedYearMonthDayAndMinuteFormat() {
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+        let value = DriveDateFormatter.string(
+            for: 1_735_689_600_000,
+            timeZone: timeZone
+        )
+
+        XCTAssertEqual(value, "2025-01-01 00:00")
+    }
+
     // [修改] 拖动过程中只更新界面，松手后才向播放器发送一次 seek，避免连续 Range 请求和状态回跳。
     func testVideoPlaybackControllerSeeksOnceWhenScrubbingEnds() async throws {
         let factory = TestDriveVideoPlayerEngineFactory()
@@ -1405,7 +1520,7 @@ final class DriveViewModelTests: XCTestCase {
         XCTAssertEqual(model.errorMessage, "根目录不能移动")
     }
 
-    func testBatchDeleteContinuesAfterOneFailure() async {
+    func testBatchDeleteKeepsWholeSelectionWhenServerBatchDeleteFails() async {
         let directory = DriveFileEntry.directory(id: 2, parentId: 1, name: "空目录")
         let first = DriveFileEntry.file(id: 101, parentId: 1, name: "一.pdf")
         let second = DriveFileEntry.file(id: 102, parentId: 1, name: "二.pdf")
@@ -1424,10 +1539,13 @@ final class DriveViewModelTests: XCTestCase {
 
         let deletedDirectories = await repository.deletedDirectories
         let deletedFiles = await repository.deletedFiles
-        XCTAssertEqual(deletedDirectories, [2])
+        XCTAssertTrue(deletedDirectories.isEmpty)
         XCTAssertEqual(deletedFiles, [101, 102])
-        XCTAssertEqual(model.selectedEntryIDs, [102])
+        XCTAssertEqual(model.selectedEntryIDs, [2, 101, 102])
         XCTAssertNotNil(model.errorMessage)
+        let batchRequest = await repository.batchDeleteRequests.first
+        XCTAssertEqual(batchRequest?.fileIDs, [101, 102])
+        XCTAssertEqual(batchRequest?.directoryIDs, [2])
     }
 
     // [修改] 选中目录下载时必须递归下载全部文件，并在本地保留目录层级，不能静默忽略目录。
@@ -1533,8 +1651,8 @@ final class DriveViewModelTests: XCTestCase {
         XCTAssertEqual(operations, [.file(101), .file(102), .directory(2)])
     }
 
-    // [修改] 递归删除任一文件失败时不能继续删父目录，选中项保留供用户重试。
-    func testBatchDeleteKeepsDirectorySelectedWhenRecursiveFileDeleteFails() async {
+    // [修改] 目录批量删除不再由 iOS 枚举子文件，直接交给服务端递归处理。
+    func testBatchDeleteDelegatesSelectedDirectoryRecursionToServer() async {
         let selectedDirectory = DriveFileEntry.directory(id: 2, parentId: 1, name: "资料")
         let firstFile = DriveFileEntry.file(id: 101, parentId: 2, name: "成功.pdf")
         let failedFile = DriveFileEntry.file(id: 102, parentId: 2, name: "失败.pdf")
@@ -1553,11 +1671,14 @@ final class DriveViewModelTests: XCTestCase {
 
         let deleted = await model.deleteSelected()
 
-        XCTAssertTrue(deleted.isEmpty)
-        XCTAssertEqual(model.selectedEntryIDs, [2])
+        XCTAssertEqual(deleted.map(\.id), [2])
+        XCTAssertTrue(model.selectedEntryIDs.isEmpty)
         let deletedDirectories = await repository.deletedDirectories
-        XCTAssertTrue(deletedDirectories.isEmpty)
-        XCTAssertNotNil(model.errorMessage)
+        XCTAssertEqual(deletedDirectories, [2])
+        XCTAssertNil(model.errorMessage)
+        let batchRequest = await repository.batchDeleteRequests.first
+        XCTAssertEqual(batchRequest?.fileIDs, [])
+        XCTAssertEqual(batchRequest?.directoryIDs, [2])
     }
 
     func testBatchDownloadGeneratesCollisionFreeDestinationName() async throws {
@@ -2027,6 +2148,7 @@ private actor DriveRepositorySpy: DriveRepository {
     private(set) var movedDirectories: [(Int64, Int64)] = []
     private(set) var deletedDirectories: [Int64] = []
     private(set) var deletedFiles: [Int64] = []
+    private(set) var batchDeleteRequests: [(fileIDs: [Int64], directoryIDs: [Int64])] = []
     private(set) var deleteOperations: [DeleteOperation] = []
     private(set) var listRequests: [ListRequest] = []
     private(set) var rootCalls = 0
@@ -2080,6 +2202,11 @@ private actor DriveRepositorySpy: DriveRepository {
     func deleteDirectory(id: Int64) async throws {
         deletedDirectories.append(id)
         deleteOperations.append(.directory(id))
+    }
+    func deleteEntries(fileIDs: [Int64], directoryIDs: [Int64]) async throws {
+        batchDeleteRequests.append((fileIDs, directoryIDs))
+        for fileID in fileIDs { try await deleteFile(id: fileID) }
+        for directoryID in directoryIDs { try await deleteDirectory(id: directoryID) }
     }
     func moveDirectory(id: Int64, targetParentId: Int64) async throws { movedDirectories.append((id, targetParentId)) }
     func fileDetail(id: Int64) async throws -> DriveFileEntry {

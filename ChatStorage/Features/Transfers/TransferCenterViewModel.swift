@@ -109,10 +109,10 @@ final class TransferCenterViewModel {
         }
     }
 
-    // [修改] 一次清理当前账号当前服务下的已完成和失败任务，不碰进行中、暂停和已取消任务。
+    // [修改] 一次清理当前账号当前服务下的已完成、失败和已取消任务，不碰进行中和暂停任务。
     func clearFinished() async {
         let finishedTaskIDs = Set(ownedTasks(await store.all()).filter {
-            $0.status == .completed || $0.status == .failed
+            $0.status == .completed || $0.status == .failed || $0.status == .cancelled
         }.map(\.id))
         guard !finishedTaskIDs.isEmpty else { return }
         do {

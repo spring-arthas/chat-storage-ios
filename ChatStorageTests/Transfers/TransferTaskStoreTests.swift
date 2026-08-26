@@ -1127,7 +1127,7 @@ final class TransferTaskStoreTests: XCTestCase {
         XCTAssertTrue(resumedTaskIDs.isEmpty)
     }
 
-    // [修改] 清理已完成和失败记录前先删除应用上传副本和失败下载留下的 part 文件。
+    // [修改] 清理已完成、失败和已取消记录前先删除应用上传副本和下载留下的 part 文件。
     func testCleanupCompletedArtifactsRemovesUploadCopyAndDownloadPart() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let sourceRoot = root.appendingPathComponent("sources", isDirectory: true)
@@ -1138,6 +1138,9 @@ final class TransferTaskStoreTests: XCTestCase {
         let destination = root.appendingPathComponent("download.bin")
         let partURL = destination.appendingPathExtension("part")
         try Data("partial".utf8).write(to: partURL)
+        let cancelledDestination = root.appendingPathComponent("cancelled-download.bin")
+        let cancelledPartURL = cancelledDestination.appendingPathExtension("part")
+        try Data("cancelled-partial".utf8).write(to: cancelledPartURL)
         let configuration = try ServerConfiguration(host: "127.0.0.1")
         let store = FileTransferTaskStore(fileURL: root.appendingPathComponent("transfers.json"))
         try await store.insert(TransferTaskRecord(
@@ -1184,6 +1187,28 @@ final class TransferTaskStoreTests: XCTestCase {
             createdAt: 1,
             updatedAt: 2
         ))
+        try await store.insert(TransferTaskRecord(
+            id: "cancelled-download-task",
+            direction: .download,
+            status: .cancelled,
+            sourcePath: nil,
+            destinationPath: cancelledDestination.path,
+            fileName: "cancelled-download.bin",
+            fileType: "bin",
+            fileSize: 10,
+            remoteFileId: 78,
+            targetDirectoryId: nil,
+            uploadPurpose: nil,
+            batchId: nil,
+            serverScopeID: configuration.storageScopeID,
+            userId: 7,
+            username: "alice",
+            md5: nil,
+            transferredBytes: 2,
+            errorMessage: nil,
+            createdAt: 1,
+            updatedAt: 2
+        ))
         let manager = TransferManager(
             configuration: configuration,
             identity: TransferIdentity(userId: 7, username: "alice", transferToken: "secret-token"),
@@ -1191,7 +1216,7 @@ final class TransferTaskStoreTests: XCTestCase {
             sourceRootURL: sourceRoot
         )
 
-        let taskIDs: Set<String> = ["upload-task", "download-task"]
+        let taskIDs: Set<String> = ["upload-task", "download-task", "cancelled-download-task"]
         try await manager.cleanupCompletedArtifacts(taskIDs: taskIDs)
         try await store.clearFinished(
             taskIDs: taskIDs,
@@ -1201,6 +1226,7 @@ final class TransferTaskStoreTests: XCTestCase {
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: uploadDirectory.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: partURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cancelledPartURL.path))
         let remaining = await store.all()
         XCTAssertTrue(remaining.isEmpty)
     }

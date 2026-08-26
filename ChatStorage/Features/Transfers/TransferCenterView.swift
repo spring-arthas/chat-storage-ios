@@ -123,13 +123,23 @@ struct TransferCenterView: View {
         HStack(spacing: 8) {
             switch task.status {
             case .preparing:
-                Button("取消", role: .destructive) { Task { await model.cancel(task) } }
+                EmptyView()
             case .failed:
                 Button("重试") { Task { await model.retry(task) } }
             case .paused, .pausedAuthentication:
-                Button("继续") { Task { await model.retry(task) } }
+                Button {
+                    Task { await model.retry(task) }
+                } label: {
+                    Image(systemName: "play.circle.fill")
+                }
+                .accessibilityLabel("继续\(directionText(task.direction))任务")
             case .queued, .hashing, .running, .verifying:
-                Button("暂停") { Task { await model.pause(task) } }
+                Button {
+                    Task { await model.pause(task) }
+                } label: {
+                    Image(systemName: "pause.circle.fill")
+                }
+                .accessibilityLabel("暂停\(directionText(task.direction))任务")
             case .completed:
                 if task.direction == .download {
                     Button("打开") { quickLookAccess = model.fileAccess(for: task) }
@@ -140,13 +150,20 @@ struct TransferCenterView: View {
             }
             // [修改] 永久失败任务可主动放弃，避免无法清理的记录一直滞留。
             if model.canCancel(task) {
-                Button(task.status == .failed ? "放弃" : "取消", role: .destructive) {
+                Button(role: .destructive) {
                     Task { await model.cancel(task) }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
                 }
+                .accessibilityLabel("\(task.status == .failed ? "放弃" : "取消")\(directionText(task.direction))任务")
             }
         }
         // [修改] List 行内按钮只响应按钮自身，点击文件名、进度条等任务内容不得触发暂停/取消。
         .buttonStyle(.borderless)
+    }
+
+    private func directionText(_ direction: TransferDirection) -> String {
+        direction == .upload ? "上传" : "下载"
     }
 
     private func statusText(_ status: TransferStatus) -> String {

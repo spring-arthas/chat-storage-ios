@@ -90,17 +90,37 @@ final class TransferCenterViewModel {
     }
 
     func clearCompleted() async {
-        // [修改] 只清理状态为「已完成」的上传和下载任务，不碰已取消、失败等记录。
+        // [修改] 保留旧入口语义，只清理状态为「已完成」的任务。
         let completedTaskIDs = Set(ownedTasks(await store.all()).filter {
             $0.status == .completed
         }.map(\.id))
         guard !completedTaskIDs.isEmpty else { return }
-        if let manager {
-            try? await manager.cleanupCompletedArtifacts(taskIDs: completedTaskIDs)
-        }
         do {
+            if let manager {
+                try await manager.cleanupCompletedArtifacts(taskIDs: completedTaskIDs)
+            }
             try await store.clearCompleted(
                 taskIDs: completedTaskIDs,
+                userId: userId,
+                serverScopeID: serverScopeID
+            )
+        } catch {
+            errorMessage = "清理传输记录失败"
+        }
+    }
+
+    // [修改] 一次清理当前账号当前服务下的已完成和失败任务，不碰进行中、暂停和已取消任务。
+    func clearFinished() async {
+        let finishedTaskIDs = Set(ownedTasks(await store.all()).filter {
+            $0.status == .completed || $0.status == .failed
+        }.map(\.id))
+        guard !finishedTaskIDs.isEmpty else { return }
+        do {
+            if let manager {
+                try await manager.cleanupCompletedArtifacts(taskIDs: finishedTaskIDs)
+            }
+            try await store.clearFinished(
+                taskIDs: finishedTaskIDs,
                 userId: userId,
                 serverScopeID: serverScopeID
             )

@@ -515,6 +515,18 @@ actor FileTransferTaskStore {
         try commit(updatedRecords)
     }
 
+    // [修改] 清除传输中心的「已完成与失败」记录，暂停、取消和进行中的任务必须保留。
+    func clearFinished(taskIDs: Set<String>, userId: Int64, serverScopeID: String? = nil) throws {
+        let updatedRecords = records.filter { _, task in
+            let ownsServer = serverScopeID == nil || task.serverScopeID == serverScopeID
+            let ownsTask = ownsServer && task.userId == userId
+            let isRequestedFinished = taskIDs.contains(task.id)
+                && (task.status == .completed || task.status == .failed)
+            return !ownsTask || !isRequestedFinished
+        }
+        try commit(updatedRecords)
+    }
+
     func publishCurrent() { broadcaster.yield(sortedRecords) }
 
     private var sortedRecords: [TransferTaskRecord] {

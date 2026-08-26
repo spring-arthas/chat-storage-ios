@@ -815,20 +815,20 @@ actor TransferManager {
         reservedDownloadPathsByTaskID.removeAll()
     }
 
-    // [修改] 只清理用户本次确认的终态任务；任一文件删除失败时保留全部记录供重试。
+    // [修改] 清理用户本次确认的已完成和失败任务；任一残留文件删除失败时保留全部记录供重试。
     func cleanupCompletedArtifacts(taskIDs: Set<String>) async throws {
         let completedTasks = await store.all().filter {
             taskIDs.contains($0.id)
                 && owns($0)
-                && $0.status == .completed
+                && ($0.status == .completed || $0.status == .failed)
         }
         for task in completedTasks {
-            // [修改] 单个任务的残留文件清理失败不影响其他任务，也不阻断记录清理。
+            // [修改] 残留文件删除失败必须向上传输中心抛出，避免数据库记录先被清掉。
             switch task.direction {
             case .upload:
-                try? removePersistedUploadSource(for: task)
+                try removePersistedUploadSource(for: task)
             case .download:
-                try? removePartialDownload(for: task)
+                try removePartialDownload(for: task)
             }
         }
     }

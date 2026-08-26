@@ -1127,7 +1127,7 @@ final class TransferTaskStoreTests: XCTestCase {
         XCTAssertTrue(resumedTaskIDs.isEmpty)
     }
 
-    // [修改] 清理终态记录前先删除应用上传副本和取消下载留下的 part 文件。
+    // [修改] 清理已完成和失败记录前先删除应用上传副本和失败下载留下的 part 文件。
     func testCleanupCompletedArtifactsRemovesUploadCopyAndDownloadPart() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let sourceRoot = root.appendingPathComponent("sources", isDirectory: true)
@@ -1165,7 +1165,7 @@ final class TransferTaskStoreTests: XCTestCase {
         try await store.insert(TransferTaskRecord(
             id: "download-task",
             direction: .download,
-            status: .cancelled,
+            status: .failed,
             sourcePath: nil,
             destinationPath: destination.path,
             fileName: "download.bin",
@@ -1193,7 +1193,7 @@ final class TransferTaskStoreTests: XCTestCase {
 
         let taskIDs: Set<String> = ["upload-task", "download-task"]
         try await manager.cleanupCompletedArtifacts(taskIDs: taskIDs)
-        try await store.clearCompleted(
+        try await store.clearFinished(
             taskIDs: taskIDs,
             userId: 7,
             serverScopeID: configuration.storageScopeID

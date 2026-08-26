@@ -52,8 +52,8 @@ struct TransferCenterView: View {
                 Menu("传输操作", systemImage: "ellipsis.circle") {
                     Button("全部取消", role: .destructive) { Task { await model.cancelAll() } }
                         .disabled(model.cancellableCount == 0)
-                    Button("清理已完成") { Task { await model.clearCompleted() } }
-                        .disabled(!model.tasks.contains { $0.status == .completed })
+                    Button("清理已完成与失败") { Task { await model.clearFinished() } }
+                        .disabled(!model.tasks.contains { $0.status == .completed || $0.status == .failed })
                 }
             }
         }

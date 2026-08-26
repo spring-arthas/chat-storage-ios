@@ -199,24 +199,28 @@ final class TransferCenterViewModelTests: XCTestCase {
         XCTAssertEqual(model.tasks, [ownTask])
     }
 
-    // [修改] 清理记录只能删除当前账号已完成或已取消的任务，其他账号历史必须保留。
-    func testClearCompletedOnlyRemovesCurrentUserRecords() async throws {
+    // [修改] 清理记录只能删除当前账号已完成和失败的任务，其他状态及其他账号历史必须保留。
+    func testClearFinishedOnlyRemovesCurrentUserRecords() async throws {
         let store = FileTransferTaskStore(fileURL: temporaryTransferStoreURL())
         let ownCompleted = TransferTaskRecord.fixture(id: "own-completed", direction: .upload, status: .completed, userId: 7, username: "alice")
+        let ownFailed = TransferTaskRecord.fixture(id: "own-failed", direction: .upload, status: .failed, userId: 7, username: "alice")
         let otherCompleted = TransferTaskRecord.fixture(id: "other-completed", direction: .download, status: .completed, userId: 8, username: "bob")
+        let otherFailed = TransferTaskRecord.fixture(id: "other-failed", direction: .upload, status: .failed, userId: 8, username: "bob")
         try await store.insert(ownCompleted)
+        try await store.insert(ownFailed)
         try await store.insert(otherCompleted)
+        try await store.insert(otherFailed)
         let manager = TransferManagerSpy()
         let model = TransferCenterViewModel(store: store, manager: manager, userId: 7)
 
-        await model.clearCompleted()
+        await model.clearFinished()
 
         let remaining = await store.all()
-        XCTAssertEqual(remaining, [otherCompleted])
+        XCTAssertEqual(remaining, [otherCompleted, otherFailed])
         let cleanupCount = await manager.cleanupCompletedArtifactsCount
         XCTAssertEqual(cleanupCount, 1)
         let cleanedTaskIDs = await manager.cleanedTaskIDs
-        XCTAssertEqual(cleanedTaskIDs, [[ownCompleted.id]])
+        XCTAssertEqual(cleanedTaskIDs, [[ownCompleted.id, ownFailed.id]])
     }
 
     // [修改] 清理开始后才进入终态的任务不属于本次快照，记录必须留到下一次清理。

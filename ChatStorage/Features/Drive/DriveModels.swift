@@ -244,6 +244,10 @@ struct DirectoryChildrenRequest: Codable, Sendable { let dirId: Int64 }
 struct CreateDirectoryRequest: Codable, Sendable { let pId: Int64; let dirName: String }
 struct RenameDirectoryRequest: Codable, Sendable { let id: Int64; let dirName: String }
 struct DeleteDirectoryRequest: Codable, Sendable { let id: Int64 }
+struct BatchDeleteEntriesRequest: Codable, Sendable {
+    let fileIds: [Int64]
+    let directoryIds: [Int64]
+}
 struct MoveDirectoryRequest: Codable, Sendable { let dirId: Int64; let targetParentId: Int64 }
 struct FileListRequest: Codable, Sendable { let dirId: Int64; let fileName: String; let pageNum: Int; let pageSize: Int }
 struct FileIDRequest: Codable, Sendable { let fileId: Int64 }

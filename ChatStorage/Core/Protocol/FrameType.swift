@@ -14,6 +14,7 @@ enum FrameType: UInt8, CaseIterable, Sendable {
     case directoryMoveRequest = 0x13
     case directoryResponse = 0x14
     case directoryListRequest = 0x15
+    case directoryBatchDeleteRequest = 0x16
 
     case directoryFileMetadata = 0x20
     case directoryFileData = 0x21

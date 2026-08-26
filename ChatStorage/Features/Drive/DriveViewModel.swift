@@ -506,33 +506,39 @@ final class DriveViewModel {
         let targetIDs = Set(targets.map(\.id))
         isBatchOperating = true
         defer { isBatchOperating = false }
-        var failedIDs = Set<Int64>()
-        var cancelledIDs = Set<Int64>()
-        var failedNames: [String] = []
-        var deletedEntries: [DriveFileEntry] = []
-        for entry in targets {
-            do {
-                // [修改] 每个选中目录作为一个失败单元；任一子文件失败时不再删除父目录，并保留该目录供重试。
-                try await deleteEntryRecursively(entry)
-                deletedEntries.append(entry)
-            } catch {
-                if Self.isCancellation(error) {
-                    cancelledIDs.insert(entry.id)
-                } else {
-                    failedIDs.insert(entry.id)
-                    failedNames.append(entry.name)
-                }
+        let fileIDs = targets.filter(\.isFile).map(\.id)
+        let directoryIDs = targets.filter { !$0.isFile && !isRootDirectory($0.id) }.map(\.id)
+        guard fileIDs.count + directoryIDs.count == targets.count else {
+            errorMessage = "根目录不能删除"
+            return []
+        }
+        do {
+            // [修改] 目录递归删除交给服务端一次完成，服务端同时清理数据库记录和文件系统。
+            try await repository.deleteEntries(fileIDs: fileIDs, directoryIDs: directoryIDs)
+            selectedEntryIDs.subtract(targetIDs)
+            // [修改] 目录树已加载时同步清理其中所有已知子文件缓存，避免递归删除后预览继续命中旧文件。
+            let cacheFileIDs = targets.reduce(into: Set<Int64>()) { result, entry in
+                result.formUnion(cachedFileIDs(in: entry))
             }
+            for fileID in cacheFileIDs {
+                await transferManager?.removeCachedFile(remoteFileId: fileID)
+            }
+            await refreshAfterMutation()
+            return targets
+        } catch {
+            guard !Self.isCancellation(error) else { return [] }
+            // [修改] 批量接口失败时保留本次快照选择，避免用户误以为目录树已删除。
+            selectedEntryIDs.formUnion(targetIDs)
+            errorMessage = (error as? LocalizedError)?.errorDescription ?? "批量删除失败"
+            return []
         }
-        // [修改] 只结算本次快照，操作期间后来选中的其他项目必须保留；失败和取消项继续选中。
-        selectedEntryIDs.subtract(targetIDs)
-        selectedEntryIDs.formUnion(failedIDs.union(cancelledIDs))
-        await refreshAfterMutation()
-        if !failedNames.isEmpty {
-            // [修改] 批量删除不中断后续项目，并明确保留失败项供用户重试。
-            errorMessage = "\(failedNames.count) 个项目删除失败：\(failedNames.joined(separator: "、"))"
+    }
+
+    private func cachedFileIDs(in entry: DriveFileEntry) -> Set<Int64> {
+        if entry.isFile { return [entry.id] }
+        return entry.children.reduce(into: Set<Int64>()) { result, child in
+            result.formUnion(cachedFileIDs(in: child))
         }
-        return deletedEntries
     }
 
     // [修改] 网盘导入和下载统一进入持久化传输中心。

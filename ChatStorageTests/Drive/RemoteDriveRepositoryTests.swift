@@ -309,6 +309,20 @@ final class RemoteDriveRepositoryTests: XCTestCase {
         XCTAssertEqual(frames[0].type, .fileDeleteRequest)
         XCTAssertEqual(object["fileId"] as? Int, 4)
     }
+
+    func testBatchDeleteUsesRecursiveDirectoryDeleteProtocol() async throws {
+        let payload = Data(#"{"success":true,"code":200,"data":null}"#.utf8)
+        let client = DriveFrameClient(responses: [Frame(type: .directoryResponse, payload: payload)])
+        let repository = RemoteDriveRepository(client: client)
+
+        try await repository.deleteEntries(fileIDs: [101, 102], directoryIDs: [12, 15])
+
+        let frames = await client.sentFrames
+        XCTAssertEqual(frames.map(\.type), [.directoryBatchDeleteRequest])
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: frames[0].payload) as? [String: Any])
+        XCTAssertEqual(object["fileIds"] as? [Int], [101, 102])
+        XCTAssertEqual(object["directoryIds"] as? [Int], [12, 15])
+    }
 }
 
 private actor DriveFrameClient: FrameRequesting {

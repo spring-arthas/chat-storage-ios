@@ -7,6 +7,7 @@ protocol DriveRepository: Sendable {
     func createDirectory(parentId: Int64, name: String) async throws
     func renameDirectory(id: Int64, name: String) async throws
     func deleteDirectory(id: Int64) async throws
+    func deleteEntries(fileIDs: [Int64], directoryIDs: [Int64]) async throws
     func moveDirectory(id: Int64, targetParentId: Int64) async throws
     func fileDetail(id: Int64) async throws -> DriveFileEntry
     func renameFile(id: Int64, name: String) async throws
@@ -25,6 +26,12 @@ extension DriveRepository {
 
     func moveFile(id: Int64, targetParentId: Int64) async throws {
         throw DriveRepositoryError.server("当前数据源不支持文件移动")
+    }
+
+    // [修改] 离线/测试仓库没有批量协议时保留逐项删除兜底，正式远端仓库覆盖为一次 0x16 请求。
+    func deleteEntries(fileIDs: [Int64], directoryIDs: [Int64]) async throws {
+        for fileID in fileIDs { try await deleteFile(id: fileID) }
+        for directoryID in directoryIDs { try await deleteDirectory(id: directoryID) }
     }
 }
 
@@ -95,6 +102,14 @@ actor RemoteDriveRepository: DriveRepository {
     }
     func deleteDirectory(id: Int64) async throws {
         try await operation(Frame(type: .directoryDeleteRequest, payload: try ProtocolJSON.encoder().encode(DeleteDirectoryRequest(id: id))))
+    }
+    func deleteEntries(fileIDs: [Int64], directoryIDs: [Int64]) async throws {
+        guard !fileIDs.isEmpty || !directoryIDs.isEmpty else { throw DriveRepositoryError.invalidResponse }
+        let request = BatchDeleteEntriesRequest(fileIds: fileIDs, directoryIds: directoryIDs)
+        try await operation(Frame(
+            type: .directoryBatchDeleteRequest,
+            payload: try ProtocolJSON.encoder().encode(request)
+        ))
     }
     func moveDirectory(id: Int64, targetParentId: Int64) async throws {
         try await operation(Frame(

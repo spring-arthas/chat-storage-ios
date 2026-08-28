@@ -113,7 +113,7 @@ struct DynamicDetailView: View {
     @State private var replyText = ""
     @State private var isSendingReply = false
     @State private var errorMessage: String?
-    @State private var mediaPreview: ChatAttachmentPreview?
+    @State private var mediaGallery: DynamicMediaGalleryState?
     @State private var previewingMediaID: Int64?
     @State private var showsDeleteConfirmation = false
 
@@ -214,7 +214,9 @@ struct DynamicDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .task { await loadDetail() }
-        .sheet(item: $mediaPreview) { DynamicMediaPreviewSheet(preview: $0) }
+        .sheet(item: $mediaGallery) { gallery in
+            DynamicMediaGalleryView(state: gallery, previewProvider: attachmentPreviewProvider)
+        }
         .alert("动态操作失败", isPresented: actionErrorIsPresented) {
             Button("知道了") { errorMessage = nil }
         } message: {
@@ -372,21 +374,9 @@ struct DynamicDetailView: View {
         }
     }
 
-    private func openMedia(_ media: DynamicMedia) {
-        guard previewingMediaID == nil else { return }
-        guard let attachmentPreviewProvider else {
-            errorMessage = "当前账号没有可用的媒体预览凭据"
-            return
-        }
-        previewingMediaID = media.fileId
-        Task {
-            defer { previewingMediaID = nil }
-            do {
-                mediaPreview = try await attachmentPreviewProvider.preview(for: media.chatAttachment)
-            } catch {
-                errorMessage = message(for: error)
-            }
-        }
+    private func openMedia(_ media: DynamicMedia, in collection: [DynamicMedia]) {
+        errorMessage = nil
+        mediaGallery = DynamicMediaGalleryState(media: collection, selectedMediaID: media.fileId)
     }
 
     private func message(for error: Error) -> String {

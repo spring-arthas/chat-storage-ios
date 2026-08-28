@@ -180,6 +180,9 @@ enum DriveGridThumbnailLayout {
 // [修改] 列表卡片高度只包含缩略图和一次上下内边距，不能再叠加外层 padding 拉出大块空白。
 enum DriveListRowLayout {
     static let verticalPadding: CGFloat = 12
+    // [修改] 外层 ScrollView 已负责列表内容边距，列表行只保留上下 6pt 分隔，避免相邻卡片重合。
+    static let outerHorizontalPadding: CGFloat = 0
+    static let outerVerticalPadding: CGFloat = 6
 
     static func cardHeight(forThumbnailSide thumbnailSide: CGFloat) -> CGFloat {
         max(thumbnailSide, 0) + verticalPadding * 2
@@ -1571,8 +1574,8 @@ struct DrivePlaceholderView: View {
             Button { beginRename(entry) } label: { Label("重命名", systemImage: "pencil") }.tint(AppTheme.documentBlue)
         }
         .task(id: thumbnailKey(for: entry)) { await loadThumbnail(for: entry) }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
+        .padding(.horizontal, DriveListRowLayout.outerHorizontalPadding)
+        .padding(.vertical, DriveListRowLayout.outerVerticalPadding)
     }
 
     private func gridCell(for entry: DriveFileEntry) -> some View {
@@ -2481,8 +2484,8 @@ struct SecureVideoSurface: UIViewRepresentable {
 
 private typealias DriveVideoSurface = SecureVideoSurface
 
-// [修改] 网盘视频预览单独使用铺满宽度的首帧容器，聊天和动态视频继续使用原始等比显示。
-private struct DrivePreviewVideoSurface: View {
+// [修改] 网盘和动态视频预览共用按 presentationSize 自适应的播放容器，避免动态页再次固定16:9。
+struct DrivePreviewVideoSurface: View {
     let player: AVPlayer
     let presentationSize: CGSize
 

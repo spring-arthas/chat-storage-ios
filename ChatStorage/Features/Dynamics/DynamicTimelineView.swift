@@ -12,7 +12,7 @@ struct DynamicTimelineView: View {
     @State private var showsComposer = false
     @State private var selectedPost: DynamicPost?
     @State private var deletionCandidate: DynamicPost?
-    @State private var mediaPreview: ChatAttachmentPreview?
+    @State private var mediaGallery: DynamicMediaGalleryState?
     @State private var previewingMediaID: Int64?
     @State private var mediaErrorMessage: String?
 
@@ -40,27 +40,19 @@ struct DynamicTimelineView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .bottomTrailing) {
-                VStack(spacing: 0) {
-                    scopeSelector
-                    if let message = mediaErrorMessage ?? activeModel.errorMessage {
-                        DynamicErrorBanner(message: message) {
-                            mediaErrorMessage = nil
-                            activeModel.clearError()
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
+            VStack(spacing: 0) {
+                dynamicHeader
+                if let message = mediaErrorMessage ?? activeModel.errorMessage {
+                    DynamicErrorBanner(message: message) {
+                        mediaErrorMessage = nil
+                        activeModel.clearError()
                     }
-                    timelineContent
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
                 }
-
-                composeButton
-                    .padding(.trailing, 18)
-                    .padding(.bottom, 20)
+                timelineContent
             }
             .background(Color(.systemBackground))
-            .navigationTitle("动态")
-            .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(isPresented: detailIsPresented) {
                 if let selectedPost {
                     DynamicDetailView(
@@ -71,9 +63,11 @@ struct DynamicTimelineView: View {
                     )
                 }
             }
+            .toolbar(.hidden, for: .navigationBar)
         }
         .task(id: selectedScope) {
             await activeModel.loadInitial()
+            await presentPersistedComposerIfNeeded()
         }
         // [修改] 聊天或网盘切到动态 Tab 时自动消费一次性草稿并打开同一个发布器。
         .onChange(of: composerRouteStore.pendingDraft != nil, initial: true) { _, hasDraft in
@@ -83,13 +77,14 @@ struct DynamicTimelineView: View {
             DynamicComposerView(
                 repository: repository,
                 attachmentUploader: attachmentUploader,
+                attachmentPreviewProvider: attachmentPreviewProvider,
                 routeStore: composerRouteStore,
                 currentUser: currentUser,
                 onPublished: refreshBothTimelines
             )
         }
-        .sheet(item: $mediaPreview) { preview in
-            DynamicMediaPreviewSheet(preview: preview)
+        .sheet(item: $mediaGallery) { gallery in
+            DynamicMediaGalleryView(state: gallery, previewProvider: attachmentPreviewProvider)
         }
         .confirmationDialog(
             "删除这条动态？",
@@ -107,6 +102,15 @@ struct DynamicTimelineView: View {
         selectedScope == .following ? followingModel : mineModel
     }
 
+    // [修改] 重新进入动态页时自动恢复未完成发布，避免草稿只存在磁盘而用户找不到。
+    private func presentPersistedComposerIfNeeded() async {
+        guard !showsComposer, let draft = await composerRouteStore.draftStore.load() else { return }
+        guard !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !draft.mediaItems.isEmpty
+                || draft.reference != nil else { return }
+        showsComposer = true
+    }
+
     private var detailIsPresented: Binding<Bool> {
         Binding(
             get: { selectedPost != nil },
@@ -121,46 +125,68 @@ struct DynamicTimelineView: View {
         )
     }
 
-    private var scopeSelector: some View {
-        HStack(spacing: 0) {
-            scopeButton(title: "关注", scope: .following, identifier: "dynamic.scope.following")
-            scopeButton(title: "我的", scope: .mine, identifier: "dynamic.scope.mine")
+    // [修改] 动态主页使用自定义顶部栏承载通知和发布入口，隐藏系统导航标题避免双标题。
+    private var dynamicHeader: some View {
+        HStack {
+            Menu {
+                Button {
+                    Task { await activeModel.refresh() }
+                } label: {
+                    Label("刷新动态", systemImage: "arrow.clockwise")
+                }
+            } label: {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "bell")
+                        .font(.system(size: 25, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .frame(width: 44, height: 44)
+                    Circle()
+                        .fill(AppTheme.primaryGreen)
+                        .frame(width: 10, height: 10)
+                        .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 2))
+                        .offset(x: -3, y: 4)
+                }
+            }
+            .accessibilityLabel("动态通知与刷新")
+            .accessibilityIdentifier("dynamic.notifications")
+
+            Spacer()
+
+            Text("动态")
+                .font(.system(size: 24, weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+
+            Spacer()
+
+            Button {
+                showsComposer = true
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 25, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 50, height: 50)
+                    .background(AppTheme.primaryGreen, in: Circle())
+            }
+            .accessibilityLabel("发布动态")
+            .accessibilityIdentifier("dynamic.compose")
         }
         .padding(.horizontal, 16)
-        .background(.bar)
-        .overlay(alignment: .bottom) { Divider() }
-    }
-
-    private func scopeButton(
-        title: String,
-        scope: DynamicTimelineScope,
-        identifier: String
-    ) -> some View {
-        Button {
-            withAnimation(.snappy(duration: 0.2)) { selectedScope = scope }
-        } label: {
-            VStack(spacing: 8) {
-                Text(title)
-                    .font(.subheadline.weight(selectedScope == scope ? .semibold : .regular))
-                    .foregroundStyle(selectedScope == scope ? .primary : .secondary)
-                Capsule()
-                    .fill(selectedScope == scope ? AppTheme.primaryGreen : .clear)
-                    .frame(width: 36, height: 3)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 10)
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier(identifier)
-        .accessibilityAddTraits(selectedScope == scope ? .isSelected : [])
+        .padding(.top, 8)
+        .padding(.bottom, 6)
     }
 
     @ViewBuilder
     private var timelineContent: some View {
         DynamicTimelineList(
             model: activeModel,
+            currentUser: currentUser,
+            selectedScope: selectedScope,
             attachmentPreviewProvider: attachmentPreviewProvider,
             previewingMediaID: previewingMediaID,
+            onSelectScope: { scope in
+                withAnimation(.snappy(duration: 0.2)) { selectedScope = scope }
+            },
+            onCompose: { showsComposer = true },
             onOpenDetail: { selectedPost = $0 },
             onOpenMedia: openMedia,
             onDelete: { deletionCandidate = $0 }
@@ -168,37 +194,9 @@ struct DynamicTimelineView: View {
         .id(selectedScope)
     }
 
-    private var composeButton: some View {
-        Button {
-            showsComposer = true
-        } label: {
-            Image(systemName: "square.and.pencil")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 58, height: 58)
-                .background(AppTheme.primaryGreen.gradient, in: Circle())
-                .shadow(color: AppTheme.deepGreen.opacity(0.28), radius: 12, y: 6)
-        }
-        .accessibilityLabel("发布动态")
-        .accessibilityIdentifier("dynamic.compose")
-    }
-
-    private func openMedia(_ media: DynamicMedia) {
-        guard previewingMediaID == nil else { return }
-        guard let attachmentPreviewProvider else {
-            mediaErrorMessage = "当前账号没有可用的媒体预览凭据"
-            return
-        }
-        previewingMediaID = media.fileId
+    private func openMedia(_ media: DynamicMedia, in collection: [DynamicMedia]) {
         mediaErrorMessage = nil
-        Task {
-            defer { previewingMediaID = nil }
-            do {
-                mediaPreview = try await attachmentPreviewProvider.preview(for: media.chatAttachment)
-            } catch {
-                mediaErrorMessage = (error as? LocalizedError)?.errorDescription ?? "媒体打开失败"
-            }
-        }
+        mediaGallery = DynamicMediaGalleryState(media: collection, selectedMediaID: media.fileId)
     }
 
     private func deleteCandidate() {
@@ -227,15 +225,34 @@ struct DynamicTimelineView: View {
 @MainActor
 private struct DynamicTimelineList: View {
     let model: DynamicTimelineViewModel
+    let currentUser: AuthenticatedUser
+    let selectedScope: DynamicTimelineScope
     let attachmentPreviewProvider: (any ChatAttachmentPreviewProviding)?
     let previewingMediaID: Int64?
+    let onSelectScope: (DynamicTimelineScope) -> Void
+    let onCompose: () -> Void
     let onOpenDetail: (DynamicPost) -> Void
-    let onOpenMedia: (DynamicMedia) -> Void
+    let onOpenMedia: (DynamicMedia, [DynamicMedia]) -> Void
     let onDelete: (DynamicPost) -> Void
 
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 0) {
+            // [修改] 主页头部新增头像栏和分享卡后，首条动态可能暂时位于首屏下方；使用 VStack 让动态卡的无障碍入口立即可用。
+            VStack(spacing: 0) {
+                DynamicStoryRail(
+                    items: DynamicTimelineStoryBuilder.make(currentUser: currentUser, posts: model.posts),
+                    onSelectMine: { onSelectScope(.mine) },
+                    onOpenPost: { postID in
+                        if let post = model.posts.first(where: { $0.id == postID }) {
+                            onOpenDetail(post)
+                        }
+                    }
+                )
+
+                DynamicHomeScopeSelector(selectedScope: selectedScope, onSelect: onSelectScope)
+
+                DynamicDailyShareCard(action: onCompose)
+
                 if model.isLoading, model.posts.isEmpty {
                     ProgressView("正在加载动态")
                         .frame(maxWidth: .infinity, minHeight: 220)
@@ -259,7 +276,12 @@ private struct DynamicTimelineList: View {
                             onOpenMedia: onOpenMedia,
                             onDelete: post.isMine ? { onDelete(post) } : nil
                         )
-                        Divider().padding(.leading, 72)
+                        .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .shadow(color: .black.opacity(0.06), radius: 10, y: 4)
+                        .padding(.horizontal, 16)
+                        // [修改] 卡片之间保留明确的呼吸间距，避免媒体高度变化后相邻动态视觉重合。
+                        .padding(.vertical, 10)
                     }
                 }
 
@@ -268,11 +290,160 @@ private struct DynamicTimelineList: View {
                         .padding(20)
                         .task(id: model.nextBeforeId) { await model.loadNextPage() }
                 }
+                // [修改] 为底部 TabView 留出可滚动安全区，最后一条动态不会被系统标签栏遮住。
             }
+            .padding(.bottom, 88)
         }
         .refreshable { await model.refresh() }
         .scrollDismissesKeyboard(.interactively)
         .accessibilityIdentifier("dynamic.timeline.\(model.scope.rawValue.lowercased())")
+    }
+}
+
+struct DynamicTimelineStory: Equatable, Identifiable, Sendable {
+    let author: DynamicAuthor
+    let latestPostID: Int64?
+    let isCurrentUser: Bool
+
+    var id: Int64 { author.id }
+}
+
+enum DynamicTimelineStoryBuilder {
+    static func make(currentUser: AuthenticatedUser, posts: [DynamicPost]) -> [DynamicTimelineStory] {
+        let currentAuthor = DynamicAuthor(
+            id: currentUser.id,
+            username: currentUser.username,
+            nickname: currentUser.nickname ?? currentUser.username,
+            avatar: currentUser.avatar
+        )
+        var identifiers: Set<Int64> = [currentUser.id]
+        var items = [DynamicTimelineStory(author: currentAuthor, latestPostID: nil, isCurrentUser: true)]
+
+        for post in posts where identifiers.insert(post.author.id).inserted {
+            items.append(DynamicTimelineStory(author: post.author, latestPostID: post.id, isCurrentUser: false))
+        }
+        return items
+    }
+}
+
+// [修改] 头像栏只展示当前时间线中出现过的作者，点击作者头像打开该作者最近一条动态。
+@MainActor
+private struct DynamicStoryRail: View {
+    let items: [DynamicTimelineStory]
+    let onSelectMine: () -> Void
+    let onOpenPost: (Int64) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 14) {
+                ForEach(items) { item in
+                    Button {
+                        if item.isCurrentUser {
+                            onSelectMine()
+                        } else if let latestPostID = item.latestPostID {
+                            onOpenPost(latestPostID)
+                        }
+                    } label: {
+                        VStack(spacing: 7) {
+                            ZStack {
+                                DynamicAvatarView(author: item.author, size: 62)
+                                    .padding(4)
+                                    .background(
+                                        item.isCurrentUser ? AppTheme.primaryGreen : Color(.separator),
+                                        in: Circle()
+                                    )
+                                    .padding(2)
+                                    .background(Color(.systemBackground), in: Circle())
+                            }
+                            Text(item.isCurrentUser ? "我的动态" : (DynamicText.nonBlank(item.author.nickname) ?? "用户"))
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .frame(width: 72)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!item.isCurrentUser && item.latestPostID == nil)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+        .accessibilityIdentifier("dynamic.story-rail")
+    }
+}
+
+// [修改] 主页分段改成参考图的胶囊样式，但仍保留当前代码已有的“关注/我的”业务含义。
+@MainActor
+private struct DynamicHomeScopeSelector: View {
+    let selectedScope: DynamicTimelineScope
+    let onSelect: (DynamicTimelineScope) -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            button(title: "关注", scope: .following, identifier: "dynamic.scope.following")
+            button(title: "我的", scope: .mine, identifier: "dynamic.scope.mine")
+        }
+        .padding(4)
+        .background(Color(.secondarySystemBackground), in: Capsule())
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+
+    private func button(title: String, scope: DynamicTimelineScope, identifier: String) -> some View {
+        Button { onSelect(scope) } label: {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(selectedScope == scope ? .white : AppTheme.primaryGreen)
+                .frame(maxWidth: .infinity, minHeight: 38)
+                .background(selectedScope == scope ? AppTheme.primaryGreen : .clear, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
+        .accessibilityAddTraits(selectedScope == scope ? .isSelected : [])
+    }
+}
+
+// [修改] 今日分享卡与顶部加号共用发布入口，让用户在主页上能直接发现新增动态功能。
+@MainActor
+private struct DynamicDailyShareCard: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(AppTheme.primaryGreen)
+                    .frame(width: 38, height: 38)
+                    .background(AppTheme.primaryGreen.opacity(0.12), in: Circle())
+
+                Text("今日分享")
+                    .font(.headline)
+                    .foregroundStyle(AppTheme.primaryGreen)
+                Text("记录生活中的小确幸")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 6)
+                Image(systemName: "chevron.right")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .frame(minHeight: 62)
+            .background(AppTheme.primaryGreen.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(AppTheme.primaryGreen.opacity(0.14), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .accessibilityLabel("今日分享，发布动态")
+        .accessibilityIdentifier("dynamic.share-prompt")
     }
 }
 
@@ -286,7 +457,7 @@ struct DynamicPostCard: View {
     let onReply: () -> Void
     let onRepost: () -> Void
     let onLike: () -> Void
-    let onOpenMedia: (DynamicMedia) -> Void
+    let onOpenMedia: (DynamicMedia, [DynamicMedia]) -> Void
     let onDelete: (() -> Void)?
 
     @State private var isExpanded = false
@@ -304,12 +475,15 @@ struct DynamicPostCard: View {
                         media: post.media,
                         previewProvider: attachmentPreviewProvider,
                         loadingMediaID: previewingMediaID,
-                        onOpen: onOpenMedia
+                        onOpen: { media in onOpenMedia(media, post.media) }
                     )
                 }
 
                 if let reference = post.reference {
-                    DynamicReferenceCard(reference: reference, onOpenMedia: onOpenMedia)
+                    DynamicReferenceCard(
+                        reference: reference,
+                        onOpenMedia: { media in onOpenMedia(media, reference.media) }
+                    )
                 }
 
                 if let original = post.originalPost?.value {
@@ -317,7 +491,7 @@ struct DynamicPostCard: View {
                         post: original,
                         previewProvider: attachmentPreviewProvider,
                         loadingMediaID: previewingMediaID,
-                        onOpenMedia: onOpenMedia
+                        onOpenMedia: { media in onOpenMedia(media, original.media) }
                     )
                 }
 
@@ -333,6 +507,8 @@ struct DynamicPostCard: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 13)
         .background(Color(.systemBackground))
+        // [修改] 将动态卡片声明为独立无障碍容器，避免卡片标识传播并覆盖点赞、评论等子按钮标识。
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("dynamic.post.\(post.id)")
     }
 
@@ -520,7 +696,106 @@ private struct DynamicInteractionBar: View {
     }
 }
 
-// [修改] 媒体数量按 1、2、3、4 项切换布局，视频和文件保留明确类型标识。
+// [修改] 动态列表统一把图片原图和视频首帧转换为缩略图，避免视频只显示类型占位图。
+enum DynamicMediaThumbnailRenderer {
+    static func thumbnailData(for preview: ChatAttachmentPreview) async throws -> Data? {
+        switch preview.kind {
+        case .image:
+            return try Data(contentsOf: preview.url)
+        case .video:
+            return try await videoThumbnailData(from: preview.url)
+        case .file:
+            return nil
+        }
+    }
+
+    private static func videoThumbnailData(from url: URL) async throws -> Data? {
+        let pinnedMediaAsset = PinnedMediaAsset(url: url)
+        let asset = pinnedMediaAsset?.asset ?? AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        let generatorBox = DynamicThumbnailImageGeneratorBox(generator)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 720, height: 720)
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 2, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 2, preferredTimescale: 600)
+
+        let data = try await withTaskCancellationHandler {
+            for second in [0.0, 1.0, 2.0] {
+                try Task.checkCancellation()
+                do {
+                    let result = try await generator.image(at: CMTime(seconds: second, preferredTimescale: 600))
+                    try Task.checkCancellation()
+                    return UIImage(cgImage: result.image).jpegData(compressionQuality: 0.82)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    continue
+                }
+            }
+            return nil
+        } onCancel: {
+            generatorBox.value.cancelAllCGImageGeneration()
+        }
+        withExtendedLifetime(pinnedMediaAsset) {}
+        return data
+    }
+}
+
+private final class DynamicThumbnailImageGeneratorBox: @unchecked Sendable {
+    let value: AVAssetImageGenerator
+
+    init(_ value: AVAssetImageGenerator) {
+        self.value = value
+    }
+}
+
+// [修改] 动态媒体最多9项：所有多媒体布局都根据实际卡片宽度计算，避免固定高度在不同 iPhone 上失真。
+enum DynamicMediaGridLayout {
+    static let maxMediaCount = 9
+    static let defaultSpacing: CGFloat = 4
+    static let singleMediaAspectRatio: CGFloat = 1.5
+    static let singleMediaMaximumHeight: CGFloat = 360
+
+    static func visibleMedia(from media: [DynamicMedia]) -> [DynamicMedia] {
+        Array(media.prefix(maxMediaCount))
+    }
+
+    // [修改] 5～9项统一三列等宽，行数按实际媒体数计算，避免固定高度截断最后一行。
+    static func rows(for count: Int) -> Int {
+        let normalizedCount = min(max(count, 0), maxMediaCount)
+        return normalizedCount == 0 ? 0 : (normalizedCount + 2) / 3
+    }
+
+    // [修改] 明确返回每一行的媒体数量，避免最后一行由 LazyVGrid 自行推断导致布局错位。
+    static func rowItemCounts(for count: Int) -> [Int] {
+        let normalizedCount = min(max(count, 0), maxMediaCount)
+        guard normalizedCount > 0 else { return [] }
+        return (0..<rows(for: normalizedCount)).map { row in
+            min(3, normalizedCount - row * 3)
+        }
+    }
+
+    // [修改] 网格高度使用容器实际宽度，兼容不同 iPhone 屏幕和横竖屏尺寸。
+    static func height(for count: Int, width: CGFloat, spacing: CGFloat) -> CGFloat {
+        let normalizedCount = min(max(count, 0), maxMediaCount)
+        guard normalizedCount > 0, width > 0 else { return 0 }
+
+        switch normalizedCount {
+        case 1:
+            return min(width / singleMediaAspectRatio, singleMediaMaximumHeight)
+        case 2, 3:
+            return max(0, (width - spacing) / 2)
+        case 4:
+            return width
+        default:
+            let cellWidth = max(0, (width - spacing * 2) / 3)
+            let rowCount = CGFloat(rows(for: normalizedCount))
+            return cellWidth * rowCount + spacing * max(0, rowCount - 1)
+        }
+    }
+}
+
+// [修改] 媒体数量按 1、2、3、4、5～9 项切换布局，所有格子由同一 Layout 给出确定边界。
 @MainActor
 struct DynamicMediaGrid: View {
     let media: [DynamicMedia]
@@ -528,55 +803,15 @@ struct DynamicMediaGrid: View {
     let loadingMediaID: Int64?
     let onOpen: (DynamicMedia) -> Void
 
-    private var items: [DynamicMedia] { Array(media.prefix(4)) }
-    private var height: CGFloat {
-        switch items.count {
-        case 1: 220
-        case 2: 164
-        case 3, 4: 220
-        default: 0
-        }
-    }
+    private var items: [DynamicMedia] { DynamicMediaGridLayout.visibleMedia(from: media) }
 
     var body: some View {
-        GeometryReader { proxy in
-            let spacing: CGFloat = 3
-            let halfWidth = max(0, (proxy.size.width - spacing) / 2)
-            Group {
-                switch items.count {
-                case 1:
-                    cell(items[0])
-                case 2:
-                    HStack(spacing: spacing) {
-                        cell(items[0]).frame(width: halfWidth)
-                        cell(items[1]).frame(width: halfWidth)
-                    }
-                case 3:
-                    HStack(spacing: spacing) {
-                        cell(items[0]).frame(width: halfWidth)
-                        VStack(spacing: spacing) {
-                            cell(items[1])
-                            cell(items[2])
-                        }
-                        .frame(width: halfWidth)
-                    }
-                case 4:
-                    VStack(spacing: spacing) {
-                        HStack(spacing: spacing) {
-                            cell(items[0])
-                            cell(items[1])
-                        }
-                        HStack(spacing: spacing) {
-                            cell(items[2])
-                            cell(items[3])
-                        }
-                    }
-                default:
-                    EmptyView()
-                }
+        DynamicMediaMosaicLayout(spacing: DynamicMediaGridLayout.defaultSpacing) {
+            ForEach(items) { item in
+                cell(item)
             }
         }
-        .frame(height: height)
+        .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -591,6 +826,89 @@ struct DynamicMediaGrid: View {
             previewProvider: previewProvider,
             isOpening: loadingMediaID == item.fileId,
             onOpen: { onOpen(item) }
+        )
+    }
+}
+
+// [修改] 统一计算1～9项媒体的边界：2项等宽方格，3项左大右上下两格，4项2×2，5～9项三列网格。
+private struct DynamicMediaMosaicLayout: Layout {
+    let spacing: CGFloat
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let width = max(0, proposal.width ?? 0)
+        return CGSize(width: width, height: DynamicMediaGridLayout.height(for: subviews.count, width: width, spacing: spacing))
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let width = max(0, bounds.width)
+        let count = min(subviews.count, DynamicMediaGridLayout.maxMediaCount)
+        guard count > 0, width > 0 else { return }
+
+        switch count {
+        case 1:
+            place(subviews[0], in: CGRect(x: bounds.minX, y: bounds.minY, width: width, height: bounds.height))
+        case 2:
+            let cellWidth = max(0, (width - spacing) / 2)
+            place(subviews[0], in: CGRect(x: bounds.minX, y: bounds.minY, width: cellWidth, height: cellWidth))
+            place(subviews[1], in: CGRect(x: bounds.minX + cellWidth + spacing, y: bounds.minY, width: cellWidth, height: cellWidth))
+        case 3:
+            placeThreeItemMosaic(subviews, width: width, bounds: bounds)
+        case 4:
+            placeFourItemGrid(subviews, width: width, bounds: bounds)
+        default:
+            placeThreeColumnGrid(subviews, count: count, width: width, bounds: bounds)
+        }
+    }
+
+    private func placeThreeItemMosaic(_ subviews: Subviews, width: CGFloat, bounds: CGRect) {
+        let cellWidth = max(0, (width - spacing) / 2)
+        place(subviews[0], in: CGRect(x: bounds.minX, y: bounds.minY, width: cellWidth, height: cellWidth))
+        let rightX = bounds.minX + cellWidth + spacing
+        let rightHeight = max(0, (cellWidth - spacing) / 2)
+        place(subviews[1], in: CGRect(x: rightX, y: bounds.minY, width: cellWidth, height: rightHeight))
+        place(subviews[2], in: CGRect(x: rightX, y: bounds.minY + rightHeight + spacing, width: cellWidth, height: rightHeight))
+    }
+
+    private func placeFourItemGrid(_ subviews: Subviews, width: CGFloat, bounds: CGRect) {
+        let cellWidth = max(0, (width - spacing) / 2)
+        for index in 0..<min(4, subviews.count) {
+            let row = index / 2
+            let column = index % 2
+            let origin = CGPoint(
+                x: bounds.minX + CGFloat(column) * (cellWidth + spacing),
+                y: bounds.minY + CGFloat(row) * (cellWidth + spacing)
+            )
+            place(subviews[index], in: CGRect(x: origin.x, y: origin.y, width: cellWidth, height: cellWidth))
+        }
+    }
+
+    private func placeThreeColumnGrid(_ subviews: Subviews, count: Int, width: CGFloat, bounds: CGRect) {
+        let cellWidth = max(0, (width - spacing * 2) / 3)
+        for index in 0..<count {
+            let row = index / 3
+            let column = index % 3
+            let origin = CGPoint(
+                x: bounds.minX + CGFloat(column) * (cellWidth + spacing),
+                y: bounds.minY + CGFloat(row) * (cellWidth + spacing)
+            )
+            place(subviews[index], in: CGRect(x: origin.x, y: origin.y, width: cellWidth, height: cellWidth))
+        }
+    }
+
+    private func place(_ subview: LayoutSubviews.Element, in frame: CGRect) {
+        subview.place(
+            at: frame.origin,
+            anchor: .topLeading,
+            proposal: ProposedViewSize(width: frame.width, height: frame.height)
         )
     }
 }
@@ -651,12 +969,14 @@ private struct DynamicMediaCell: View {
         .buttonStyle(.plain)
         .accessibilityLabel("打开\(media.kind.title)：\(media.fileName)")
         .accessibilityIdentifier("dynamic.media.\(media.fileId)")
-        // [修改] 图片缩略图走已有附件预览缓存；视频不会为首屏额外申请播放地址。
+        // [修改] 图片和视频统一走附件预览链路，视频异步生成第一帧后再替换占位图。
         .task(id: media.fileId) {
-            guard media.kind == .image, let previewProvider else { return }
+            guard media.kind != .file, let previewProvider else { return }
             guard let preview = try? await previewProvider.preview(for: media.chatAttachment),
-                  preview.kind == .image else { return }
-            image = UIImage(contentsOfFile: preview.url.path)
+                  let data = try? await DynamicMediaThumbnailRenderer.thumbnailData(for: preview),
+                  !Task.isCancelled,
+                  let image = UIImage(data: data) else { return }
+            self.image = image
         }
     }
 
@@ -725,13 +1045,12 @@ struct DynamicAvatarView: View {
 
     var body: some View {
         Group {
-            if let avatarData = author.avatar.flatMap({ Data(base64Encoded: $0) }),
-               let image = UIImage(data: avatarData) {
+            if let image = Self.image(from: author.avatar) {
                 Image(uiImage: image).resizable().scaledToFill()
             } else if let value = author.avatar,
                       let url = URL(string: value),
                       let scheme = url.scheme?.lowercased(),
-                      scheme == "https" {
+                      scheme == "http" || scheme == "https" {
                 AsyncImage(url: url) { phase in
                     if let image = phase.image {
                         image.resizable().scaledToFill()
@@ -746,6 +1065,20 @@ struct DynamicAvatarView: View {
         .frame(width: size, height: size)
         .clipShape(Circle())
         .accessibilityLabel("\(DynamicText.nonBlank(author.nickname) ?? DynamicText.nonBlank(author.username) ?? "用户")的头像")
+    }
+
+    // [修改] 兼容服务端返回的纯 Base64、data URL 和头像 HTTP/HTTPS 地址。
+    static func image(from rawValue: String?) -> UIImage? {
+        guard let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawValue.isEmpty else { return nil }
+        let payload: String
+        if let separator = rawValue.range(of: "base64,", options: .caseInsensitive) {
+            payload = String(rawValue[separator.upperBound...])
+        } else {
+            payload = rawValue
+        }
+        guard let data = Data(base64Encoded: payload, options: [.ignoreUnknownCharacters]) else { return nil }
+        return UIImage(data: data)
     }
 
     private var initials: some View {
@@ -784,7 +1117,147 @@ struct DynamicErrorBanner: View {
     }
 }
 
-// [修改] 动态媒体打开后仍复用聊天附件预览结果和网盘视频状态机，不直接拼接远端地址。
+// [修改] 动态媒体浏览状态保留同一动态的完整媒体顺序，并从点击项开始分页浏览。
+struct DynamicMediaGalleryState: Identifiable, Equatable {
+    let media: [DynamicMedia]
+    let selectedIndex: Int
+
+    var id: String {
+        "\(selectedIndex)-" + media.map { String($0.fileId) }.joined(separator: ",")
+    }
+
+    init(media: [DynamicMedia], selectedMediaID: Int64) {
+        let visibleMedia = DynamicMediaGridLayout.visibleMedia(from: media)
+        self.media = visibleMedia
+        self.selectedIndex = max(0, visibleMedia.firstIndex(where: { $0.fileId == selectedMediaID }) ?? 0)
+    }
+}
+
+// [修改] 图片和视频在同一个分页预览器内连续查看，图片完整适配，视频复用在线播放控制器。
+@MainActor
+struct DynamicMediaGalleryView: View {
+    let state: DynamicMediaGalleryState
+    let previewProvider: (any ChatAttachmentPreviewProviding)?
+
+    @State private var selectedIndex: Int
+    @State private var previews: [Int64: ChatAttachmentPreview] = [:]
+    @State private var errors: [Int64: String] = [:]
+
+    init(state: DynamicMediaGalleryState, previewProvider: (any ChatAttachmentPreviewProviding)?) {
+        self.state = state
+        self.previewProvider = previewProvider
+        _selectedIndex = State(initialValue: state.selectedIndex)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if state.media.isEmpty {
+                    ContentUnavailableView("没有可预览的媒体", systemImage: "photo.on.rectangle.angled")
+                } else if let previewProvider {
+                    TabView(selection: $selectedIndex) {
+                        ForEach(Array(state.media.enumerated()), id: \.element.fileId) { index, media in
+                            page(for: media, previewProvider: previewProvider)
+                                .tag(index)
+                                .task(id: "\(media.fileId)-\(selectedIndex)") {
+                                    guard abs(index - selectedIndex) <= 1 else { return }
+                                    await load(media: media, previewProvider: previewProvider)
+                                }
+                        }
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .automatic))
+                } else {
+                    ContentUnavailableView("当前账号没有可用的媒体预览凭据", systemImage: "lock.slash")
+                }
+            }
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle("\(min(selectedIndex + 1, state.media.count))/\(state.media.count)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+        }
+    }
+
+    @ViewBuilder
+    private func page(
+        for media: DynamicMedia,
+        previewProvider: any ChatAttachmentPreviewProviding
+    ) -> some View {
+        if let preview = previews[media.fileId] {
+            switch preview.kind {
+            case .image:
+                DynamicImagePreviewView(preview: preview)
+            case .video:
+                DynamicVideoPreviewView(preview: preview)
+            case .file:
+                DynamicQuickLookPreview(url: preview.url)
+            }
+        } else if let message = errors[media.fileId] {
+            VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title)
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .foregroundStyle(.white)
+                Button("重新加载") {
+                    Task { await load(media: media, previewProvider: previewProvider, force: true) }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        } else {
+            ProgressView("加载媒体")
+                .tint(.white)
+                .foregroundStyle(.white)
+        }
+    }
+
+    private func load(
+        media: DynamicMedia,
+        previewProvider: any ChatAttachmentPreviewProviding,
+        force: Bool = false
+    ) async {
+        guard force || (previews[media.fileId] == nil && errors[media.fileId] == nil) else { return }
+        do {
+            let preview = try await previewProvider.preview(for: media.chatAttachment)
+            guard !Task.isCancelled else { return }
+            previews[media.fileId] = preview
+            errors[media.fileId] = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            errors[media.fileId] = (error as? LocalizedError)?.errorDescription ?? "媒体打开失败"
+        }
+    }
+}
+
+// [修改] 图片预览取消固定 padding 和横向滚动，始终按容器比例完整显示整张图片。
+@MainActor
+private struct DynamicImagePreviewView: View {
+    let preview: ChatAttachmentPreview
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ProgressView("加载图片")
+                    .tint(.white)
+                    .foregroundStyle(.white)
+            }
+        }
+        .background(Color.black)
+        .task(id: preview.id) {
+            guard let data = try? await DynamicMediaThumbnailRenderer.thumbnailData(for: preview),
+                  !Task.isCancelled,
+                  let image = UIImage(data: data) else { return }
+            self.image = image
+        }
+    }
+}
+
+// [修改] 保留单媒体预览兼容入口；新列表和详情统一使用 DynamicMediaGalleryView。
 @MainActor
 struct DynamicMediaPreviewSheet: View {
     let preview: ChatAttachmentPreview
@@ -796,16 +1269,7 @@ struct DynamicMediaPreviewSheet: View {
                 case .video:
                     DynamicVideoPreviewView(preview: preview)
                 case .image:
-                    if let image = UIImage(contentsOfFile: preview.url.path) {
-                        ScrollView([.horizontal, .vertical]) {
-                            Image(uiImage: image)
-                                .resizable()
-                                .scaledToFit()
-                                .padding()
-                        }
-                    } else {
-                        ContentUnavailableView("图片无法打开", systemImage: "photo.badge.exclamationmark")
-                    }
+                    DynamicImagePreviewView(preview: preview)
                 case .file:
                     DynamicQuickLookPreview(url: preview.url)
                 }
@@ -869,9 +1333,16 @@ private struct DynamicVideoPreviewView: View {
 
     private func videoContent(player: AVPlayer, fullscreen: Bool) -> some View {
         VStack(spacing: 0) {
-            SecureVideoSurface(player: player)
-                .frame(maxWidth: .infinity, maxHeight: fullscreen ? .infinity : nil)
-                .aspectRatio(fullscreen ? nil : 16 / 9, contentMode: .fit)
+            if fullscreen {
+                SecureVideoSurface(player: player)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // [修改] 动态视频弹窗复用网盘播放框，按 AVPlayer presentationSize 展示真实比例。
+                DrivePreviewVideoSurface(
+                    player: player,
+                    presentationSize: controller.presentationSizeState.size
+                )
+            }
             controls(fullscreen: fullscreen)
         }
         .background(Color.black)

@@ -214,6 +214,12 @@ final class DriveViewModelTests: XCTestCase {
         )
     }
 
+    // [修改] 列表行只保留上下分隔间距，不能在已有列表内容边距外重复增加左右空白。
+    func testListRowDoesNotAddExtraOuterInsets() {
+        XCTAssertEqual(DriveListRowLayout.outerHorizontalPadding, 0, accuracy: 0.1)
+        XCTAssertEqual(DriveListRowLayout.outerVerticalPadding, 6, accuracy: 0.1)
+    }
+
     func testVideoPresentationSizeStateReplacesThePlaceholderAfterMetadataLoads() {
         var state = DriveVideoPresentationSizeState()
 

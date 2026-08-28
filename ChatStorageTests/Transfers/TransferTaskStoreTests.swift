@@ -1044,6 +1044,40 @@ final class TransferTaskStoreTests: XCTestCase {
         XCTAssertEqual(completed?.status, .completed)
     }
 
+    // [修改] 同一动态媒体批次再次上传时复用已完成任务，避免重启或重复触发产生第二份远端文件。
+    func testUploadWithSameBatchIDReusesPersistedTask() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceURL = root.appendingPathComponent("photo.jpg")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 10).write(to: sourceURL)
+        let configuration = try ServerConfiguration(host: "127.0.0.1")
+        let store = FileTransferTaskStore(fileURL: root.appendingPathComponent("transfers.json"))
+        let manager = TransferManager(
+            configuration: configuration,
+            identity: TransferIdentity(userId: 7, username: "alice", transferToken: "secret-token"),
+            store: store,
+            uploadEngine: SuccessfulUploadEngine(),
+            sourceRootURL: root.appendingPathComponent("sources", isDirectory: true)
+        )
+
+        let first = try await manager.upload(
+            sourceURL: sourceURL,
+            targetDirectoryId: 1,
+            uploadPurpose: "CHAT_ATTACHMENT",
+            batchId: "dynamic-item-1"
+        )
+        let second = try await manager.upload(
+            sourceURL: sourceURL,
+            targetDirectoryId: 1,
+            uploadPurpose: "CHAT_ATTACHMENT",
+            batchId: "dynamic-item-1"
+        )
+
+        XCTAssertEqual(first, second)
+        let tasks = await store.all()
+        XCTAssertEqual(tasks.filter { $0.batchId == "dynamic-item-1" }.count, 1)
+    }
+
     func testCancellingRunningJobDoesNotGetOverwrittenAsPaused() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let store = FileTransferTaskStore(fileURL: root.appendingPathComponent("transfers.json"))

@@ -38,6 +38,33 @@ protocol PhotoLibraryUploadPreparing: Sendable {
     ) async
 }
 
+// [修改] 动态发布复用传输中心的相册视频任务和进度，不让动态页另起一套上传状态。
+protocol DynamicPhotoLibraryUploading: Sendable {
+    var transferTaskStream: AsyncStream<[TransferTaskRecord]> { get }
+    func transferTask(id: String) async -> TransferTaskRecord?
+    // [修改] 动态本地附件先创建 preparing 任务，文件读取完成后再交给同一传输队列。
+    func beginDynamicFileUpload(
+        fileName: String,
+        batchId: String
+    ) async throws -> PhotoLibraryUploadPreparation
+    func finishDynamicFileUpload(
+        _ preparation: PhotoLibraryUploadPreparation,
+        sourceURL: URL
+    ) async throws
+    func failDynamicFileUpload(
+        _ preparation: PhotoLibraryUploadPreparation,
+        message: String
+    ) async
+    func beginDynamicVideoUpload(
+        fileName: String,
+        photoLibraryAssetIdentifier: String,
+        batchId: String
+    ) async throws -> PhotoLibraryUploadPreparation
+    func startDynamicVideoUpload(_ preparation: PhotoLibraryUploadPreparation) async throws
+    func retryDynamicVideoUpload(_ preparation: PhotoLibraryUploadPreparation) async
+    func failDynamicVideoUpload(_ preparation: PhotoLibraryUploadPreparation, message: String) async
+}
+
 struct TransferCompletionEvent: Equatable, Sendable {
     let taskId: String
     let direction: TransferDirection
@@ -50,6 +77,11 @@ actor TransferManager {
 
     nonisolated var completionEvents: AsyncStream<TransferCompletionEvent> {
         completionBroadcaster.stream()
+    }
+
+    // [修改] 动态发布页订阅同一份持久任务快照，实时显示上传百分比。
+    nonisolated var transferTaskStream: AsyncStream<[TransferTaskRecord]> {
+        store.taskStream()
     }
     private enum ActiveJob {
         case upload(Task<UploadResult, Error>)
@@ -173,6 +205,15 @@ actor TransferManager {
         uploadPurpose: String = "CLOUD_FILE",
         batchId: String? = nil
     ) async throws -> UploadResult {
+        // [修改] 动态媒体重试/重启时复用同一批次的持久任务，保留服务端已确认的偏移量和 MD5。
+        if let batchId,
+           let existing = await existingUploadRecord(batchId: batchId, fileName: sourceURL.lastPathComponent) {
+            if existing.status == .completed, let remoteFileId = existing.remoteFileId {
+                return UploadResult(fileId: remoteFileId, uploadedBytes: existing.transferredBytes)
+            }
+            guard existing.status != .cancelled else { throw CancellationError() }
+            return try await waitForUpload(existing)
+        }
         let identity = credentialStore.current()
         let taskId = UUID().uuidString
         let persistedSource = try persistSource(sourceURL, taskId: taskId)
@@ -221,6 +262,40 @@ actor TransferManager {
         } catch {
             activeJobs.removeValue(forKey: taskId)
             throw error
+        }
+    }
+
+    private func existingUploadRecord(batchId: String, fileName: String) async -> TransferTaskRecord? {
+        let records = await store.all()
+        return records
+            .filter {
+                owns($0)
+                    && $0.direction == .upload
+                    && $0.batchId == batchId
+                    && $0.fileName == fileName
+                    && $0.status != .cancelled
+            }
+            .max { lhs, rhs in lhs.updatedAt < rhs.updatedAt }
+    }
+
+    private func waitForUpload(_ record: TransferTaskRecord) async throws -> UploadResult {
+        let job: Task<UploadResult, Error>
+        let ownsJob: Bool
+        if case .upload(let active)? = activeJobs[record.id] {
+            job = active
+            ownsJob = false
+        } else {
+            job = makeUploadJob(record)
+            activeJobs[record.id] = .upload(job)
+            ownsJob = true
+        }
+        defer {
+            if ownsJob { activeJobs.removeValue(forKey: record.id) }
+        }
+        return try await withTaskCancellationHandler {
+            try await job.value
+        } onCancel: {
+            Task { await self.pause(record.id) }
         }
     }
 
@@ -1305,6 +1380,65 @@ actor TransferManager {
 extension TransferManager: TransferManaging {}
 extension TransferManager: FileDownloadManaging {}
 extension TransferManager: PhotoLibraryUploadPreparing {}
+extension TransferManager: DynamicPhotoLibraryUploading {
+    func transferTask(id: String) async -> TransferTaskRecord? {
+        await store.task(id: id)
+    }
+
+    // [修改] 动态本地图片和无资源标识的视频复用传输中心的持久任务创建流程。
+    func beginDynamicFileUpload(
+        fileName: String,
+        batchId: String
+    ) async throws -> PhotoLibraryUploadPreparation {
+        try await beginPhotoLibraryUpload(
+            fileName: fileName,
+            photoLibraryAssetIdentifier: nil,
+            targetDirectoryId: 1,
+            uploadPurpose: "CHAT_ATTACHMENT",
+            batchId: batchId
+        )
+    }
+
+    func finishDynamicFileUpload(
+        _ preparation: PhotoLibraryUploadPreparation,
+        sourceURL: URL
+    ) async throws {
+        try await finishPhotoLibraryUpload(preparation, sourceURL: sourceURL)
+    }
+
+    func failDynamicFileUpload(
+        _ preparation: PhotoLibraryUploadPreparation,
+        message: String
+    ) async {
+        await failPhotoLibraryUpload(preparation, message: message)
+    }
+
+    func beginDynamicVideoUpload(
+        fileName: String,
+        photoLibraryAssetIdentifier: String,
+        batchId: String
+    ) async throws -> PhotoLibraryUploadPreparation {
+        try await beginPhotoLibraryUpload(
+            fileName: fileName,
+            photoLibraryAssetIdentifier: photoLibraryAssetIdentifier,
+            targetDirectoryId: 1,
+            uploadPurpose: "CHAT_ATTACHMENT",
+            batchId: batchId
+        )
+    }
+
+    func startDynamicVideoUpload(_ preparation: PhotoLibraryUploadPreparation) async throws {
+        try await startPhotoLibraryVideoUpload(preparation)
+    }
+
+    func retryDynamicVideoUpload(_ preparation: PhotoLibraryUploadPreparation) async {
+        await retry(preparation.taskId)
+    }
+
+    func failDynamicVideoUpload(_ preparation: PhotoLibraryUploadPreparation, message: String) async {
+        await failPhotoLibraryUpload(preparation, message: message)
+    }
+}
 
 private extension String {
     var nilIfBlank: String? {

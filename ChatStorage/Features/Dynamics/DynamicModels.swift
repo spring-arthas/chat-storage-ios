@@ -336,32 +336,104 @@ struct DynamicComposerDraft: Equatable, Sendable {
     }
 }
 
-enum DynamicComposerMediaState: Equatable, Sendable {
+enum DynamicComposerMediaState: String, Codable, Equatable, Sendable {
     case preparing
     case uploading
     case succeeded
     case failed
 }
 
-struct DynamicComposerMediaItem: Identifiable, Equatable, Sendable {
+struct DynamicComposerMediaItem: Codable, Identifiable, Equatable, Sendable {
     let id: UUID
-    let localURL: URL
+    // [修改] 先创建传输任务时使用占位 URL，PhotosPicker 读取完成后替换为真实暂存文件。
+    var localURL: URL
     let kind: DynamicMediaKind
+    // [修改] 每个媒体项固定一个上传批次标识，失败重试和重启恢复都接回同一传输任务。
+    let uploadBatchID: String
+    // [修改] 相册视频不复制到本地，保存资源标识和传输中心任务 ID 以便重启后续传。
+    let photoLibraryAssetIdentifier: String?
+    var transferTaskID: String?
     var state: DynamicComposerMediaState
+    var progress: Double
     var uploadedMedia: DynamicMedia?
+
+    // [修改] 发布页的展示状态统一由媒体项计算，避免卡片各自判断导致上传中误开放预览。
+    var normalizedProgress: Double {
+        min(max(progress, 0), 1)
+    }
+
+    var canPreview: Bool {
+        state == .succeeded && uploadedMedia != nil
+    }
+
+    var shouldDimPreview: Bool {
+        !canPreview
+    }
+
+    var uploadStatusTitle: String {
+        switch state {
+        case .preparing: "准备发送"
+        case .uploading: "正在上传"
+        case .succeeded: "上传完成"
+        case .failed: "上传失败"
+        }
+    }
 
     init(
         id: UUID = UUID(),
         localURL: URL,
         kind: DynamicMediaKind,
+        uploadBatchID: String? = nil,
+        photoLibraryAssetIdentifier: String? = nil,
+        transferTaskID: String? = nil,
         state: DynamicComposerMediaState = .preparing,
+        progress: Double = 0,
         uploadedMedia: DynamicMedia? = nil
     ) {
         self.id = id
         self.localURL = localURL
         self.kind = kind
+        self.uploadBatchID = uploadBatchID ?? "dynamic-media-\(id.uuidString)"
+        self.photoLibraryAssetIdentifier = photoLibraryAssetIdentifier
+        self.transferTaskID = transferTaskID
         self.state = state
+        self.progress = min(max(progress, 0), 1)
         self.uploadedMedia = uploadedMedia
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, localURL, kind, uploadBatchID, photoLibraryAssetIdentifier, transferTaskID, state, progress, uploadedMedia
+    }
+
+    // [修改] 兼容首版动态草稿，新增字段缺失时仍能恢复旧草稿。
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        localURL = try values.decode(URL.self, forKey: .localURL)
+        kind = try values.decode(DynamicMediaKind.self, forKey: .kind)
+        uploadBatchID = try values.decodeIfPresent(String.self, forKey: .uploadBatchID) ?? "dynamic-media-\(id.uuidString)"
+        photoLibraryAssetIdentifier = try values.decodeIfPresent(String.self, forKey: .photoLibraryAssetIdentifier)
+        transferTaskID = try values.decodeIfPresent(String.self, forKey: .transferTaskID)
+        state = try values.decodeIfPresent(DynamicComposerMediaState.self, forKey: .state) ?? .preparing
+        progress = min(max(try values.decodeIfPresent(Double.self, forKey: .progress) ?? 0, 0), 1)
+        uploadedMedia = try values.decodeIfPresent(DynamicMedia.self, forKey: .uploadedMedia)
+    }
+}
+
+// [修改] 发布页将上传状态收敛为一条底部状态栏，避免准备中再额外绘制独立转圈。
+struct DynamicComposerMediaStatusPresentation: Equatable, Sendable {
+    let title: String
+    let progress: Double
+    let showsProgressTrack: Bool
+    let showsActivityIndicator: Bool
+    let allowsRetry: Bool
+
+    init(item: DynamicComposerMediaItem) {
+        title = item.uploadStatusTitle
+        progress = item.normalizedProgress
+        showsProgressTrack = item.state == .uploading
+        showsActivityIndicator = false
+        allowsRetry = item.state == .failed
     }
 }
 

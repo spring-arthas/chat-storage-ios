@@ -139,7 +139,8 @@ struct MainShellView: View {
     @State private var currentUser: AuthenticatedUser
     @State private var totalUnreadCount = 0
     @State private var selectedTab: MainShellTab = .messages
-    @State private var dynamicComposerRouteStore = DynamicComposerRouteStore()
+    // [修改] 动态未完成草稿按服务器和用户隔离，切换账号后不会串出上一账号的媒体。
+    @State private var dynamicComposerRouteStore: DynamicComposerRouteStore
     @State private var messageNotificationVisibility = MessageNotificationVisibilityState()
     private let messageNotificationCoordinator: MessageNotificationCoordinator
 
@@ -174,6 +175,9 @@ struct MainShellView: View {
         self.onSaveConfiguration = onSaveConfiguration
         self.onLogout = onLogout
         self.onUserUpdated = onUserUpdated
+        _dynamicComposerRouteStore = State(initialValue: DynamicComposerRouteStore(
+            persistenceKey: "\(configuration.storageScopeID)-\(user.id)"
+        ))
         let runtime = MainShellTransferRuntimeRegistry.shared.runtime(
             user: user,
             configuration: configuration,

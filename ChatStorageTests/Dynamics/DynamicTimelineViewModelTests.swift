@@ -1,8 +1,143 @@
+import AVFoundation
+import UIKit
 import XCTest
 @testable import ChatStorage
 
 @MainActor
 final class DynamicTimelineViewModelTests: XCTestCase {
+    // [修改] 动态主页头像栏必须把当前用户置顶，并按作者去重，避免同一作者重复出现。
+    func testDynamicTimelineStoryItemsPutCurrentUserFirstAndDeduplicateAuthors() {
+        let currentUser = AuthenticatedUser.preview
+        let posts = [
+            post(1, authorID: 2, nickname: "好友一"),
+            post(2, authorID: 2, nickname: "好友一"),
+            post(3, authorID: 3, nickname: "好友二")
+        ]
+
+        let items = DynamicTimelineStoryBuilder.make(currentUser: currentUser, posts: posts)
+
+        XCTAssertEqual(items.map(\.author.id), [currentUser.id, 2, 3])
+        XCTAssertTrue(items.first?.isCurrentUser == true)
+        XCTAssertEqual(items.dropFirst().map(\.latestPostID), [1, 3])
+    }
+
+    // [修改] 动态卡片必须能识别带 data 前缀的头像，并为图片预览生成可显示的图像数据。
+    func testDynamicMediaPresentationSupportsAvatarDataURLAndImageThumbnail() async throws {
+        let source = try XCTUnwrap(UIImage(systemName: "person.crop.circle")?.pngData())
+        let avatar = "data:image/png;base64,\(source.base64EncodedString())"
+        XCTAssertNotNil(DynamicAvatarView.image(from: avatar))
+
+        let preview = ChatAttachmentPreview(
+            attachment: ChatAttachment(
+                kind: "image",
+                fileId: 11,
+                fileName: "照片.png",
+                fileSize: Int64(source.count),
+                mimeType: "image/png"
+            ),
+            kind: .image,
+            url: try temporaryMediaURL(data: source)
+        )
+        let thumbnail = try await DynamicMediaThumbnailRenderer.thumbnailData(for: preview)
+        XCTAssertNotNil(UIImage(data: try XCTUnwrap(thumbnail)))
+    }
+
+    // [修改] 动态视频预览必须复用按 presentationSize 自适应的网盘播放表面，禁止重新写死16:9。
+    func testDynamicVideoPreviewUsesPresentationSizeSurface() throws {
+        let testFileURL = URL(fileURLWithPath: #filePath)
+        let sourceURL = testFileURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("ChatStorage/Features/Dynamics/DynamicTimelineView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("DrivePreviewVideoSurface("))
+        XCTAssertFalse(source.contains(".aspectRatio(fullscreen ? nil : 16 / 9"))
+    }
+
+    // [修改] 动态列表最多展示发布请求中的全部9个媒体，不再因为旧的四宫格上限丢失媒体。
+    func testDynamicMediaGridKeepsAllNineMediaItems() {
+        let media = (1...9).map { index in
+            DynamicMedia(
+                kind: index.isMultiple(of: 2) ? .video : .image,
+                fileId: Int64(index),
+                fileName: "media-(index)",
+                fileSize: 10,
+                mimeType: index.isMultiple(of: 2) ? "video/mp4" : "image/jpeg"
+            )
+        }
+
+        XCTAssertEqual(DynamicMediaGridLayout.visibleMedia(from: media).map(\.fileId), media.map(\.fileId))
+        XCTAssertEqual(
+            DynamicMediaGridLayout.height(for: media.count, width: 343, spacing: 4),
+            343,
+            accuracy: 0.001
+        )
+    }
+
+    // [修改] 5～9项媒体高度必须按实际卡片宽度计算，避免不同 iPhone 宽度下第二行或第三行被裁掉。
+    func testDynamicMediaGridFitsAllRowsAcrossPhoneWidths() {
+        XCTAssertEqual(DynamicMediaGridLayout.rows(for: 5), 2)
+        XCTAssertEqual(DynamicMediaGridLayout.rows(for: 9), 3)
+        XCTAssertEqual(
+            DynamicMediaGridLayout.height(for: 5, width: 343, spacing: 3),
+            227.666,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            DynamicMediaGridLayout.height(for: 9, width: 430, spacing: 3),
+            430,
+            accuracy: 0.001
+        )
+    }
+
+    // [修改] 5～9项必须按完整行分配媒体，最后一行不能被懒加载网格测量吞掉。
+    func testDynamicMediaGridDistributesItemsIntoCompleteRows() {
+        XCTAssertEqual(DynamicMediaGridLayout.rowItemCounts(for: 5), [3, 2])
+        XCTAssertEqual(DynamicMediaGridLayout.rowItemCounts(for: 7), [3, 3, 1])
+        XCTAssertEqual(DynamicMediaGridLayout.rowItemCounts(for: 9), [3, 3, 3])
+    }
+
+    // [修改] 多媒体动态的高度必须由实际卡片宽度推导，2/3项保持整体方形，4项为2×2，9项为3×3。
+    func testDynamicMediaGridUsesResponsiveMosaicMetrics() {
+        let width: CGFloat = 343
+        let spacing: CGFloat = 4
+
+        XCTAssertEqual(
+            DynamicMediaGridLayout.height(for: 2, width: width, spacing: spacing),
+            169.5,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            DynamicMediaGridLayout.height(for: 3, width: width, spacing: spacing),
+            169.5,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            DynamicMediaGridLayout.height(for: 4, width: width, spacing: spacing),
+            343,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            DynamicMediaGridLayout.height(for: 9, width: width, spacing: spacing),
+            343,
+            accuracy: 0.001
+        )
+    }
+
+    // [修改] 打开动态媒体时保留原始顺序，并从点击的媒体开始连续浏览。
+    func testDynamicMediaGalleryStartsAtTappedMediaAndKeepsOrder() {
+        let media = (1...3).map { index in
+            DynamicMedia(kind: .image, fileId: Int64(index), fileName: "image-(index)", fileSize: 10, mimeType: "image/jpeg")
+        }
+
+        let state = DynamicMediaGalleryState(media: media, selectedMediaID: 2)
+
+        XCTAssertEqual(state.media.map(\.fileId), [1, 2, 3])
+        XCTAssertEqual(state.selectedIndex, 1)
+    }
+
     // [修改] 首屏、刷新和游标分页必须稳定替换/追加并按动态 ID 去重。
     func testInitialRefreshAndPaginationMergeWithoutDuplicates() async {
         let repository = TimelineDynamicRepository(
@@ -122,11 +257,13 @@ private func post(
     _ id: Int64,
     likeCount: Int = 0,
     repostCount: Int = 0,
-    isMine: Bool = true
+    isMine: Bool = true,
+    authorID: Int64 = 7,
+    nickname: String = "Alice"
 ) -> DynamicPost {
     DynamicPost(
         id: id,
-        author: DynamicAuthor(id: 7, username: "alice", nickname: "Alice", avatar: nil),
+        author: DynamicAuthor(id: authorID, username: "user-\(authorID)", nickname: nickname, avatar: nil),
         content: "post-\(id)",
         media: [],
         reference: nil,
@@ -139,6 +276,13 @@ private func post(
         createdAt: id,
         isMine: isMine
     )
+}
+
+private func temporaryMediaURL(data: Data) throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("dynamic-media-\(UUID().uuidString).png")
+    try data.write(to: url)
+    return url
 }
 
 @MainActor

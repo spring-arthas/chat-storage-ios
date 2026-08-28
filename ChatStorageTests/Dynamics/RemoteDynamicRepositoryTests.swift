@@ -25,6 +25,36 @@ final class RemoteDynamicRepositoryTests: XCTestCase {
         XCTAssertEqual((object["reference"] as? [String: Any])?["sourceType"] as? String, "driveFile")
     }
 
+    // [修改] 9个混合媒体必须完整编码到单个发布帧，不能被客户端协议层截断。
+    func testCreateEncodesAllNineMediaItems() async throws {
+        let response = dynamicFrame(.dynamicCreateResponse,
+            #"{"success":true,"code":200,"data":{"dynamicId":91,"post":null}}"#)
+        let client = DynamicFrameClient(responses: [response])
+        let repository = RemoteDynamicRepository(client: client)
+        let media = (1...9).map { index in
+            DynamicMedia(
+                kind: index.isMultiple(of: 2) ? .video : .image,
+                fileId: Int64(index),
+                fileName: "media-\(index)",
+                fileSize: 100,
+                mimeType: index.isMultiple(of: 2) ? "video/mp4" : "image/jpeg"
+            )
+        }
+
+        _ = try await repository.create(DynamicCreateRequest(
+            content: "",
+            media: media,
+            imagePaths: media.map { String($0.fileId) }.joined(separator: ",")
+        ))
+
+        let sentFrames = await client.sentFrames
+        let sent = try XCTUnwrap(sentFrames.first)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: sent.payload) as? [String: Any])
+        let sentMedia = try XCTUnwrap(object["media"] as? [[String: Any]])
+        XCTAssertEqual(sentMedia.count, 9)
+        XCTAssertEqual(object["imagePaths"] as? String, "1,2,3,4,5,6,7,8,9")
+    }
+
     // [修改] 时间线必须发送大写 scope，并兼容 records/items、大小写字段和 nextCursor 游标。
     func testTimelineUsesUppercaseScopeAndDecodesFlexiblePage() async throws {
         let payload = #"{"success":true,"data":{"records":[{"dynamicId":101,"userId":9,"userName":"bob","nickname":"Bob","content":"hello","images":[{"kind":"video","fileId":"22","fileName":"clip.mov","fileSize":"30","mimeType":"video/quicktime"}],"likes":"4","replyCount":2,"repostCount":1,"isLiked":1,"isReposted":"true","gmtCreated":"1786500000000","mine":false}],"nextCursor":"99","hasMore":true}}"#

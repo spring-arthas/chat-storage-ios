@@ -11,6 +11,7 @@ private final class MainShellTransferRuntime {
     let key: MainShellTransferRuntimeKey
     let credentialStore: TransferCredentialStore
     let store: FileTransferTaskStore
+    let downloadedFileStore: DownloadedFileStore
     let manager: TransferManager?
     let attachmentUploader: (any ChatAttachmentUploading)?
     let attachmentPreviewProvider: (any ChatAttachmentPreviewProviding)?
@@ -33,6 +34,11 @@ private final class MainShellTransferRuntime {
         self.credentialStore = credentialStore
         let store = FileTransferTaskStore.serverScoped(configuration: configuration)
         self.store = store
+        let downloadedFileStore = DownloadedFileStore.serverScoped(
+            configuration: configuration,
+            userId: user.id
+        )
+        self.downloadedFileStore = downloadedFileStore
         // [修改] 播放地址请求使用登录后传输令牌，服务端从令牌派生真实用户。
         let mediaRepository = RemoteMediaRepository(configuration: configuration, credentialStore: credentialStore)
         self.mediaRepository = mediaRepository
@@ -42,6 +48,7 @@ private final class MainShellTransferRuntime {
             identity: TransferIdentity(userId: user.id, username: user.username, transferToken: token),
             credentialStore: credentialStore,
             store: store,
+            downloadedFileStore: downloadedFileStore,
             wifiOnlyTransfers: preferences.wifiOnlyTransfers
         )
         self.manager = manager
@@ -281,6 +288,7 @@ struct MainShellView: View {
         DrivePlaceholderView(
             repository: driveRepository,
             transferStore: transferStore,
+            downloadedFileStore: transferRuntime.downloadedFileStore,
             transferManager: transferManager,
             transferCenterManager: transferManager,
             mediaRepository: mediaRepository,

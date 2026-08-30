@@ -113,6 +113,7 @@ actor TransferManager {
     private let credentialStore: TransferCredentialStore
     private let ownerUserId: Int64
     private let store: FileTransferTaskStore
+    private let downloadedFileStore: DownloadedFileStore?
     private let uploadEngine: any FileUploading
     private let photoLibraryUploadEngine: any PhotoLibraryUploading
     private let downloadEngine: any FileDownloading
@@ -136,6 +137,7 @@ actor TransferManager {
         identity: TransferIdentity,
         credentialStore: TransferCredentialStore? = nil,
         store: FileTransferTaskStore = .shared,
+        downloadedFileStore: DownloadedFileStore? = nil,
         uploadEngine: any FileUploading = FileUploadEngine(),
         photoLibraryUploadEngine: any PhotoLibraryUploading = FileUploadEngine(),
         downloadEngine: any FileDownloading = FileDownloadEngine(),
@@ -152,6 +154,7 @@ actor TransferManager {
         self.credentialStore = credentialStore
         self.ownerUserId = identity.userId
         self.store = store
+        self.downloadedFileStore = downloadedFileStore
         self.uploadEngine = uploadEngine
         self.photoLibraryUploadEngine = photoLibraryUploadEngine
         self.downloadEngine = downloadEngine
@@ -1164,6 +1167,7 @@ actor TransferManager {
         let credentialStore = credentialStore
         let downloadEngine = downloadEngine
         let store = store
+        let downloadedFileStore = downloadedFileStore
         let executionLimiter = executionLimiter
         let networkGate = networkGate
         let completionBroadcaster = completionBroadcaster
@@ -1216,6 +1220,10 @@ actor TransferManager {
                     )
                     let completed = try await store.complete(id: record.id, remoteFileId: remoteFileId, transferredBytes: result.downloadedBytes)
                     if completed {
+                        if let downloadedFileStore,
+                           let completedTask = await store.task(id: record.id) {
+                            try? await downloadedFileStore.record(task: completedTask)
+                        }
                         completionBroadcaster.yield(.init(
                             taskId: record.id,
                             direction: .download,

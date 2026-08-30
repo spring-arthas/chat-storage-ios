@@ -115,6 +115,8 @@
 		A0D100000000000000000018 /* DynamicDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0D200000000000000000018 /* DynamicDetailView.swift */; };
 		F0CFAAF2F0A355123E65E461 /* ProfileSettingsViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F57E72432333456FFF36E66 /* ProfileSettingsViewModelTests.swift */; };
 		F3566071884D439607D0028D /* DrivePlaceholderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 592262EFD99D087A289928AC /* DrivePlaceholderView.swift */; };
+		A0D400000000000000000010 /* DownloadedFileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0D300000000000000000010 /* DownloadedFileStore.swift */; };
+		A0D400000000000000000011 /* DownloadedFilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0D300000000000000000011 /* DownloadedFilesView.swift */; };
 		F5C6B90912947AB01EEB7A1C /* TransferTaskStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 636328A4E02261926C60CAAA /* TransferTaskStore.swift */; };
 		FACC24B72E5D1198BC6D801F /* ChatBackgroundStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F97EAC5FFACA68358924104 /* ChatBackgroundStore.swift */; };
 		FC2E491F72F4AE5113E2AA55 /* MessagesPlaceholderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6E733031267029CC786B014 /* MessagesPlaceholderView.swift */; };
@@ -170,6 +172,8 @@
 		5134FA7532DA2C9AEADD7CE2 /* CurrentUserIDProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = CurrentUserIDProvider.swift; path = ChatStorage/Core/Persistence/CurrentUserIDProvider.swift; sourceTree = "<group>"; };
 		51D70D129A3559B268AFD676 /* RemoteFriendRepositoryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = RemoteFriendRepositoryTests.swift; path = ChatStorageTests/Friends/RemoteFriendRepositoryTests.swift; sourceTree = "<group>"; };
 		592262EFD99D087A289928AC /* DrivePlaceholderView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = DrivePlaceholderView.swift; path = ChatStorage/Features/Drive/DrivePlaceholderView.swift; sourceTree = "<group>"; };
+		A0D300000000000000000010 /* DownloadedFileStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = DownloadedFileStore.swift; path = ChatStorage/Features/Drive/DownloadedFileStore.swift; sourceTree = "<group>"; };
+		A0D300000000000000000011 /* DownloadedFilesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = DownloadedFilesView.swift; path = ChatStorage/Features/Drive/DownloadedFilesView.swift; sourceTree = "<group>"; };
 		5A04FEE319164FCC60A608A6 /* AppSessionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AppSessionTests.swift; path = ChatStorageTests/Authentication/AppSessionTests.swift; sourceTree = "<group>"; };
 		5F97EAC5FFACA68358924104 /* ChatBackgroundStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ChatBackgroundStore.swift; path = ChatStorage/Features/Chat/ChatBackgroundStore.swift; sourceTree = "<group>"; };
 		62F13E884A31552B0287DB0C /* DriveViewModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = DriveViewModel.swift; path = ChatStorage/Features/Drive/DriveViewModel.swift; sourceTree = "<group>"; };
@@ -340,6 +344,8 @@
 				A0D200000000000000000018 /* DynamicDetailView.swift */,
 				EC770E37565398DB4765A6DF /* DriveModels.swift */,
 				592262EFD99D087A289928AC /* DrivePlaceholderView.swift */,
+				A0D300000000000000000010 /* DownloadedFileStore.swift */,
+				A0D300000000000000000011 /* DownloadedFilesView.swift */,
 				62F13E884A31552B0287DB0C /* DriveViewModel.swift */,
 				0389436B26211344D283390E /* RemoteDriveRepository.swift */,
 				3ECF73C40A92474B3F018463 /* CachedFriendRepository.swift */,
@@ -596,6 +602,8 @@
 				A0D100000000000000000018 /* DynamicDetailView.swift in Sources */,
 				58520F31958F4D818AAA0169 /* DriveModels.swift in Sources */,
 				F3566071884D439607D0028D /* DrivePlaceholderView.swift in Sources */,
+				A0D400000000000000000010 /* DownloadedFileStore.swift in Sources */,
+				A0D400000000000000000011 /* DownloadedFilesView.swift in Sources */,
 				E23EE32D893E770E7B42F6CE /* DriveViewModel.swift in Sources */,
 				94B962724934B5E8672395BA /* RemoteDriveRepository.swift in Sources */,
 				EAFCA62C963FD4E2843608E3 /* CachedFriendRepository.swift in Sources */,

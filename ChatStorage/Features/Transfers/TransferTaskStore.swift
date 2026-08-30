@@ -527,6 +527,33 @@ actor FileTransferTaskStore {
         try commit(updatedRecords)
     }
 
+    /// Removes one completed download after it has been removed from the downloaded-files history.
+    func removeCompletedDownload(id: String, userId: Int64, serverScopeID: String? = nil) throws {
+        guard let task = records[id],
+              task.direction == .download,
+              task.status == .completed,
+              task.userId == userId,
+              (serverScopeID == nil || task.serverScopeID == serverScopeID) else { return }
+        var updatedRecords = records
+        updatedRecords.removeValue(forKey: id)
+        try commit(updatedRecords)
+    }
+
+    /// Removes completed download tasks in one commit so the transfer center stays in sync with history.
+    func removeCompletedDownloads(ids: Set<String>, userId: Int64, serverScopeID: String? = nil) throws {
+        guard !ids.isEmpty else { return }
+        let updatedRecords = records.filter { _, task in
+            let ownsServer = serverScopeID == nil || task.serverScopeID == serverScopeID
+            let shouldRemove = ids.contains(task.id)
+                && task.direction == .download
+                && task.status == .completed
+                && task.userId == userId
+                && ownsServer
+            return !shouldRemove
+        }
+        try commit(updatedRecords)
+    }
+
     func publishCurrent() { broadcaster.yield(sortedRecords) }
 
     private var sortedRecords: [TransferTaskRecord] {

@@ -31,6 +31,8 @@
 	<string>用于连接你的 Chat Storage 私人服务器并同步消息与文件。</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>用于直接从你选择的本地相册视频分块上传到私有网盘，不会在 App 中复制完整视频。</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>用于将已下载的图片和视频保存到系统相册。</string>
 	<!-- The media service on port 10188 is the private server's HTTP Range
 	     gateway. The server host is user-configurable, so a fixed ATS domain
 	     exception cannot cover it. Other network paths still use their own

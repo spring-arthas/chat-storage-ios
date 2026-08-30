@@ -1049,9 +1049,10 @@ struct DrivePlaceholderView: View {
     @State private var loadingThumbnailKeys: Set<String> = []
     @State private var pullRefreshState = DrivePullRefreshState()
     @State private var refreshUITestTriggerCount = 0
-    @State private var activeUploadCount = 0
+    @State private var activeTransferCount = 0
 
     private let transferStore: FileTransferTaskStore
+    private let downloadedFileStore: DownloadedFileStore?
     private let transferManager: (any DriveTransferManaging)?
     private let transferCenterManager: (any TransferManaging)?
     private let mediaRepository: (any MediaPlaybackProviding)?
@@ -1065,6 +1066,7 @@ struct DrivePlaceholderView: View {
     init(
         repository: any DriveRepository,
         transferStore: FileTransferTaskStore = .shared,
+        downloadedFileStore: DownloadedFileStore? = nil,
         transferManager: (any DriveTransferManaging)? = nil,
         transferCenterManager: (any TransferManaging)? = nil,
         mediaRepository: (any MediaPlaybackProviding)? = nil,
@@ -1076,6 +1078,7 @@ struct DrivePlaceholderView: View {
     ) {
         _model = State(initialValue: DriveViewModel(repository: repository, transferManager: transferManager))
         self.transferStore = transferStore
+        self.downloadedFileStore = downloadedFileStore
         self.transferManager = transferManager
         self.transferCenterManager = transferCenterManager
         self.mediaRepository = mediaRepository
@@ -1168,7 +1171,6 @@ struct DrivePlaceholderView: View {
             .safeAreaInset(edge: .bottom) {
                 if isSelecting { selectionBar }
             }
-            .overlay { loadingOverlay() }
             .task { await model.load() }
             .task {
                 guard let transferManager else { return }
@@ -1191,7 +1193,8 @@ struct DrivePlaceholderView: View {
 
     private func applyTransferSnapshot(_ tasks: [TransferTaskRecord]) {
         let owned = tasks.filter { $0.userId == userId && $0.serverScopeID == serverScopeID }
-        activeUploadCount = owned.filter { $0.direction == .upload && $0.status.isExecuting }.count
+        // 红点只统计当前正在排队或传输中的任务，上传和下载统一累加；暂停及终态不计入。
+        activeTransferCount = owned.filter(\.status.isExecuting).count
     }
 
     private var configuredContent: some View {
@@ -1363,6 +1366,21 @@ struct DrivePlaceholderView: View {
             .accessibilityIdentifier("drive.tree")
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
+            if let downloadedFileStore {
+                NavigationLink {
+                    DownloadedFilesView(
+                        store: downloadedFileStore,
+                        transferStore: transferStore,
+                        userId: userId,
+                        serverScopeID: serverScopeID
+                    )
+                } label: {
+                    Label("已下载", systemImage: "arrow.down.to.line")
+                }
+                .accessibilityLabel("已下载")
+                .accessibilityIdentifier("drive.downloaded")
+            }
+
             Button { toggleSelectionMode() } label: {
                 Image(systemName: isSelecting ? "checkmark.circle.fill" : "checklist")
             }
@@ -1466,14 +1484,14 @@ struct DrivePlaceholderView: View {
                     .foregroundStyle(AppTheme.documentBlue)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("传输中心").font(.subheadline.weight(.semibold))
-                    Text(activeUploadCount > 0 ? "\(activeUploadCount) 个任务正在上传" : "查看上传、下载、暂停和失败任务")
+                    Text(activeTransferCount > 0 ? "\(activeTransferCount) 个任务正在传输" : "查看上传、下载、暂停和失败任务")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if activeUploadCount > 0 {
-                    // [修改] 待上传 + 上传中的任务数用红色角标标注。
-                    Text("\(activeUploadCount)")
+                if activeTransferCount > 0 {
+                    // 红色角标显示所有正在排队或传输中的上传、下载任务总数。
+                    Text("\(activeTransferCount)")
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 7)
@@ -1736,12 +1754,6 @@ struct DrivePlaceholderView: View {
             .font(.title3)
             .foregroundStyle(model.selectedEntryIDs.contains(entry.id) ? AppTheme.primaryGreen : .secondary)
             .background(.thinMaterial, in: Circle())
-    }
-
-    private func loadingOverlay() -> some View {
-        Group {
-            if model.isTransferring { ProgressView("正在传输") .padding(18).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14)) }
-        }
     }
 
     private func debounceSearch() async {
@@ -2121,7 +2133,7 @@ enum DrivePreviewSharePolicy {
     }
 }
 
-private struct DrivePreview: Identifiable {
+struct DrivePreview: Identifiable {
     let entry: DriveFileEntry
     let url: URL
     let kind: DrivePreviewKind
@@ -2130,7 +2142,8 @@ private struct DrivePreview: Identifiable {
     let localShareProvider: (@MainActor () async -> DriveSharePayload?)?
     // [修改] 外部目录文件预览期间持续持有 security-scoped access。
     let access: TransferScopedURLAccess?
-    var id: String { "\(entry.id)-\(kind.rawValue)-\(url.absoluteString)" }
+    private let previewID: String?
+    var id: String { previewID ?? "\(entry.id)-\(kind.rawValue)-\(url.absoluteString)" }
 
     init(
         entry: DriveFileEntry,
@@ -2139,7 +2152,8 @@ private struct DrivePreview: Identifiable {
         playback: MediaPlayback? = nil,
         refreshPlayback: (@MainActor () async throws -> MediaPlayback)? = nil,
         localShareProvider: (@MainActor () async -> DriveSharePayload?)? = nil,
-        access: TransferScopedURLAccess? = nil
+        access: TransferScopedURLAccess? = nil,
+        id: String? = nil
     ) {
         self.entry = entry
         self.url = url
@@ -2148,17 +2162,18 @@ private struct DrivePreview: Identifiable {
         self.refreshPlayback = refreshPlayback
         self.localShareProvider = localShareProvider
         self.access = access
+        self.previewID = id
     }
 }
 
-private struct DriveSharePayload: Identifiable {
+struct DriveSharePayload: Identifiable {
     let id = UUID()
     let urls: [URL]
     // [修改] 保留外部目录的安全作用域，覆盖系统分享 sheet 的整个生命周期。
     let access: TransferScopedURLAccess?
 }
 
-private struct DrivePreviewView: View {
+struct DrivePreviewView: View {
     let preview: DrivePreview
     let startsFullscreen: Bool
     @Environment(\.dismiss) private var dismiss
@@ -2192,8 +2207,15 @@ private struct DrivePreviewView: View {
     }
 
     var body: some View {
-        if startsFullscreen, preview.kind == .video {
-            directFullscreenVideo
+        if startsFullscreen {
+            switch preview.kind {
+            case .video:
+                directFullscreenVideo
+            case .image:
+                directFullscreenImage
+            case .downloaded:
+                previewPage
+            }
         } else {
             previewPage
         }
@@ -2296,6 +2318,38 @@ private struct DrivePreviewView: View {
             AppOrientationController.setVideoFullscreen(false)
             videoController.invalidate()
         }
+    }
+
+    // 图片和视频共用沉浸式全屏容器；图片保留原有双指缩放和拖动能力。
+    @ViewBuilder
+    private var directFullscreenImage: some View {
+        imageContent
+            .background(Color.black.ignoresSafeArea())
+            .statusBarHidden(true)
+            .onAppear { AppOrientationController.setVideoFullscreen(true) }
+            .onDisappear { AppOrientationController.setVideoFullscreen(false) }
+            .overlay(alignment: .topLeading) {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 42, height: 42)
+                        .background(.black.opacity(0.58), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 18)
+                .padding(.leading, 16)
+                .accessibilityLabel("关闭图片预览")
+                .accessibilityIdentifier("drive.image.close")
+            }
+            .overlay(alignment: .topTrailing) {
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .accessibilityLabel("图片全屏查看")
+                    .accessibilityIdentifier("drive.image.fullscreen-view")
+            }
     }
 
     @ViewBuilder

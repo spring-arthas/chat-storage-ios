@@ -216,10 +216,12 @@ actor NWTransferFrameTransport: TransferFrameTransport {
             guard let candidate else { return }
             Task { await self?.handle(state: state, for: candidate) }
         }
-        candidate.start(queue: queue)
-
+        // 先登记 continuation，再启动连接。NWConnection 在本机或局域网环境下
+        // 可能在 start 返回前就发出状态回调；若先 start，ready/failed 回调会找不到
+        // continuation，下载任务就会永久停在 running 且进度为 0。
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connectContinuation = continuation
+            candidate.start(queue: queue)
         }
     }
 

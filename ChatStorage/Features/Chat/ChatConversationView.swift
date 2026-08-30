@@ -1190,10 +1190,16 @@ private struct ChatVideoPlayerView: View {
     @ViewBuilder
     private func videoContent(player: AVPlayer, fullscreen: Bool) -> some View {
         VStack(spacing: 0) {
-            if fullscreen || !showsFullscreenVideo {
+            if fullscreen {
+                DriveFullscreenVideoSurface(
+                    player: player,
+                    presentationSize: videoController.presentationSizeState.size
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if !showsFullscreenVideo {
                 SecureVideoSurface(player: player)
-                    .frame(maxWidth: .infinity, maxHeight: fullscreen ? .infinity : nil)
-                    .aspectRatio(fullscreen ? nil : 16 / 9, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+                    .aspectRatio(16 / 9, contentMode: .fit)
             } else {
                 Color.black.aspectRatio(16 / 9, contentMode: .fit)
             }

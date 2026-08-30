@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		00089314424251EC821C9E4D /* SecureStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03CD382ABE8B805CEF4DD5AC /* SecureStore.swift */; };
 		F1A2B3C4D5E6F70809101112 /* chat-storage-local-ca.der in Resources */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E6F70809101113 /* chat-storage-local-ca.der */; };
+		A0D300000000000000000002 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A0D300000000000000000001 /* Assets.xcassets */; };
 		017244C1D6BCFC534D8BF90F /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 501E4DAC6D997C246CDA5473 /* Foundation.framework */; };
 		02B96BF3AD4986CCD22DA291 /* ServerConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = C971AF83412A88EF2BD2140E /* ServerConfiguration.swift */; };
 		02E3A5A87ABF1DF377007E25 /* ProfilePlaceholderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B645FA84A43DC3CFA16F19A1 /* ProfilePlaceholderView.swift */; };
@@ -250,6 +251,7 @@
 		A0D200000000000000000016 /* DynamicTimelineView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = DynamicTimelineView.swift; path = ChatStorage/Features/Dynamics/DynamicTimelineView.swift; sourceTree = "<group>"; };
 		A0D200000000000000000017 /* DynamicComposerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = DynamicComposerView.swift; path = ChatStorage/Features/Dynamics/DynamicComposerView.swift; sourceTree = "<group>"; };
 		A0D200000000000000000018 /* DynamicDetailView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = DynamicDetailView.swift; path = ChatStorage/Features/Dynamics/DynamicDetailView.swift; sourceTree = "<group>"; };
+		A0D300000000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = ChatStorage/Resources/Assets.xcassets; sourceTree = "<group>"; };
 		FE14DDD430AAC4D01B683322 /* AppLockView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AppLockView.swift; path = ChatStorage/Features/Profile/AppLockView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -296,6 +298,7 @@
 				19C5FC60365812B894E2CD2E /* Frameworks */,
 				3FC5D0EE314E2A450FEA6FE7 /* Info.plist */,
 				F1A2B3C4D5E6F70809101113 /* chat-storage-local-ca.der */,
+				A0D300000000000000000001 /* Assets.xcassets */,
 				69087A41ABFD5D0A5E8116BC /* AppContainer.swift */,
 				7154DB3F07D2217EF60E91CF /* AppSession.swift */,
 				3D6ABE674097BCAF3B08D897 /* ChatStorageApp.swift */,
@@ -540,6 +543,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A0D300000000000000000002 /* Assets.xcassets in Resources */,
 				F1A2B3C4D5E6F70809101112 /* chat-storage-local-ca.der in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

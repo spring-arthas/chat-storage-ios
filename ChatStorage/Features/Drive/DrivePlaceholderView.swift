@@ -155,6 +155,24 @@ struct DriveImagePreviewZoomState: Equatable {
     }
 }
 
+// [修改] 全屏视频允许检查画面细节，但不能缩到小于初始等比播放尺寸，也不能无限放大。
+struct DriveVideoPreviewZoomState: Equatable {
+    static let minimumScale: CGFloat = 1
+    static let maximumScale: CGFloat = 4
+
+    private(set) var scale: CGFloat = minimumScale
+
+    mutating func applyMagnification(_ magnification: CGFloat) {
+        guard magnification.isFinite, magnification > 0 else { return }
+        scale = min(max(scale * magnification, Self.minimumScale), Self.maximumScale)
+    }
+
+    func boundedScale(_ magnification: CGFloat) -> CGFloat {
+        guard magnification.isFinite, magnification > 0 else { return scale }
+        return min(max(scale * magnification, Self.minimumScale), Self.maximumScale)
+    }
+}
+
 // [修改] 大图预览视频按容器宽度计算首帧尺寸，减少左右和顶部的无效留白。
 // [修改] 同时受容器高度约束：竖屏视频在小屏/短屏上会收窄到刚好放得下，不再溢出屏幕。
 enum DriveVideoPreviewLayout {
@@ -1024,6 +1042,7 @@ struct DrivePlaceholderView: View {
     @State private var movingFile: DriveFileEntry?
     @State private var detailEntry: DriveFileEntry?
     @State private var preview: DrivePreview?
+    @State private var fullscreenVideo: DrivePreview?
     @State private var sharePayload: DriveSharePayload?
     @State private var showsBatchDeleteConfirmation = false
     @State private var thumbnails: [String: UIImage] = [:]
@@ -1288,6 +1307,8 @@ struct DrivePlaceholderView: View {
             }
             .sheet(item: $detailEntry) { DriveFileDetailView(entry: $0) }
             .sheet(item: $preview) { DrivePreviewView(preview: $0) }
+            // 视频从文件列表直接进入沉浸式播放，不再先弹出普通预览页。
+            .fullScreenCover(item: $fullscreenVideo) { DrivePreviewView(preview: $0, startsFullscreen: true) }
             .sheet(item: $sharePayload) { payload in
                 DriveShareSheet(items: payload.urls, access: payload.access)
             }
@@ -1760,7 +1781,7 @@ struct DrivePlaceholderView: View {
                 try await mediaRepository.playback(fileId: entry.id, username: username)
             }
             // [修改] 先展示播放器，再由播放器异步申请 Range 播放地址；大视频不再等待请求完成或回退整文件下载。
-            preview = DrivePreview(
+            fullscreenVideo = DrivePreview(
                 entry: entry,
                 url: Self.pendingVideoURL,
                 kind: .video,
@@ -1772,7 +1793,12 @@ struct DrivePlaceholderView: View {
             return
         }
         guard let url = await model.preview(entry) else { return }
-        preview = DrivePreview(entry: entry, url: url, kind: isVideo(entry) ? .video : .image)
+        let nextPreview = DrivePreview(entry: entry, url: url, kind: isVideo(entry) ? .video : .image)
+        if nextPreview.kind == .video {
+            fullscreenVideo = nextPreview
+        } else {
+            preview = nextPreview
+        }
     }
 
     private static let pendingVideoURL = URL(string: "https://127.0.0.1/pending-video")!
@@ -2082,7 +2108,7 @@ private enum DriveDisplayMode: String {
     case grid
 }
 
-enum DrivePreviewKind: String {
+enum DrivePreviewKind: String, Equatable {
     case image
     case video
     case downloaded
@@ -2134,8 +2160,11 @@ private struct DriveSharePayload: Identifiable {
 
 private struct DrivePreviewView: View {
     let preview: DrivePreview
+    let startsFullscreen: Bool
+    @Environment(\.dismiss) private var dismiss
     @State private var videoController: DriveVideoPlaybackController
     @State private var showsFullscreenVideo = false
+    @State private var showsFullscreenControls = true
     @State private var isPreparingShare = false
     @State private var sharePayload: DriveSharePayload?
     @State private var imageZoom = DriveImagePreviewZoomState()
@@ -2143,8 +2172,9 @@ private struct DrivePreviewView: View {
     @GestureState private var liveImageMagnification: CGFloat = 1
     @GestureState private var liveImageOffset: CGSize = .zero
 
-    init(preview: DrivePreview) {
+    init(preview: DrivePreview, startsFullscreen: Bool = false) {
         self.preview = preview
+        self.startsFullscreen = startsFullscreen
         if let playback = preview.playback,
            let refreshPlayback = preview.refreshPlayback {
             _videoController = State(initialValue: DriveVideoPlaybackController(
@@ -2162,6 +2192,14 @@ private struct DrivePreviewView: View {
     }
 
     var body: some View {
+        if startsFullscreen, preview.kind == .video {
+            directFullscreenVideo
+        } else {
+            previewPage
+        }
+    }
+
+    private var previewPage: some View {
         NavigationStack {
             Group {
                 switch preview.kind {
@@ -2205,6 +2243,7 @@ private struct DrivePreviewView: View {
                 videoController.invalidate()
             }
             .onChange(of: showsFullscreenVideo) { _, isFullscreen in
+                if isFullscreen { showsFullscreenControls = true }
                 AppOrientationController.setVideoFullscreen(isFullscreen)
             }
         }
@@ -2227,28 +2266,73 @@ private struct DrivePreviewView: View {
         }
     }
 
+    // 从网盘打开视频时直接展示这一层，避免先进入带导航栏的预览弹层再二次全屏。
+    @ViewBuilder
+    private var directFullscreenVideo: some View {
+        Group {
+            if let player = videoController.player {
+                videoContent(player: player, fullscreen: true)
+            } else {
+                Color.black
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay { videoStatusOverlay }
+                    .accessibilityIdentifier("drive.video.loading-surface")
+            }
+        }
+        .background(Color.black.ignoresSafeArea())
+        .statusBarHidden(true)
+        .overlay(alignment: .topLeading) {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .accessibilityLabel("视频全屏播放")
+                .accessibilityIdentifier("drive.video.fullscreen-view")
+        }
+        .task { await videoController.start(autoplay: true) }
+        .onAppear {
+            showsFullscreenControls = true
+            AppOrientationController.setVideoFullscreen(true)
+        }
+        .onDisappear {
+            AppOrientationController.setVideoFullscreen(false)
+            videoController.invalidate()
+        }
+    }
+
     @ViewBuilder
     private func videoContent(player: AVPlayer, fullscreen: Bool) -> some View {
-        VStack(spacing: 0) {
-            if fullscreen || !showsFullscreenVideo {
-                if fullscreen {
-                    DriveVideoSurface(player: player, videoGravity: .resizeAspectFill)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .clipped()
-                } else {
+        if fullscreen {
+            // 视频画面始终占用完整全屏；控制条只浮在画面上，绝不能改变视频的可用高度。
+            ZStack(alignment: .bottom) {
+                DriveFullscreenVideoSurface(
+                    player: player,
+                    presentationSize: videoController.presentationSizeState.size,
+                    onTap: { withAnimation(.easeInOut(duration: 0.18)) { showsFullscreenControls.toggle() } }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if showsFullscreenControls {
+                    videoControls(player: player, fullscreen: true)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black)
+            .overlay { videoStatusOverlay }
+        } else {
+            VStack(spacing: 0) {
+                if !showsFullscreenVideo {
                     DrivePreviewVideoSurface(
                         player: player,
                         presentationSize: videoController.presentationSizeState.size
                     )
+                } else {
+                    // 全屏时卸载内嵌 AVPlayerLayer，避免同一播放器同时维持两份输出层。
+                    Color.black.aspectRatio(16 / 9, contentMode: .fit)
                 }
-            } else {
-                // [修改] 全屏时卸载内嵌 AVPlayerLayer，避免同一播放器同时维持两份输出层。
-                Color.black.aspectRatio(16 / 9, contentMode: .fit)
+                videoControls(player: player, fullscreen: false)
             }
-            videoControls(player: player, fullscreen: fullscreen)
+            .background(Color.black)
+            .overlay { videoStatusOverlay }
         }
-        .background(Color.black)
-        .overlay { videoStatusOverlay }
     }
 
     private var pendingVideoContent: some View {
@@ -2311,14 +2395,35 @@ private struct DrivePreviewView: View {
                     ProgressView().tint(.white).accessibilityLabel("视频缓冲中")
                 }
 
-                Button { showsFullscreenVideo = !fullscreen } label: {
-                    Image(systemName: fullscreen
-                        ? "arrow.down.right.and.arrow.up.left"
-                        : "arrow.up.left.and.arrow.down.right")
-                        .frame(width: 36, height: 32)
+                if fullscreen, startsFullscreen {
+                    Button {
+                        Task {
+                            await videoController.stop()
+                            dismiss()
+                        }
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .frame(width: 36, height: 32)
+                    }
+                    .accessibilityLabel("停止播放并返回列表")
+                    .accessibilityIdentifier("drive.video.close-to-list")
+
+                    Button { AppOrientationController.toggleVideoPlaybackOrientation() } label: {
+                        Image(systemName: "rectangle.landscape.rotate")
+                            .frame(width: 36, height: 32)
+                    }
+                    .accessibilityLabel("切换横竖屏播放")
+                    .accessibilityIdentifier("drive.video.orientation")
+                } else {
+                    Button { showsFullscreenVideo = !fullscreen } label: {
+                        Image(systemName: fullscreen
+                            ? "arrow.down.right.and.arrow.up.left"
+                            : "arrow.up.left.and.arrow.down.right")
+                            .frame(width: 36, height: 32)
+                    }
+                    .accessibilityLabel(fullscreen ? "退出全屏" : "全屏播放")
+                    .accessibilityIdentifier(fullscreen ? "drive.video.exit-fullscreen" : "drive.video.fullscreen")
                 }
-                .accessibilityLabel(fullscreen ? "退出全屏" : "全屏播放")
-                .accessibilityIdentifier(fullscreen ? "drive.video.exit-fullscreen" : "drive.video.fullscreen")
             }
         }
         .buttonStyle(.plain)
@@ -2503,6 +2608,130 @@ struct DrivePreviewVideoSurface: View {
         .aspectRatio(
             DriveVideoLayout.aspectRatio(for: presentationSize),
             contentMode: .fit
+        )
+    }
+}
+
+// [修改] 全屏视频以真实比例完整适配屏幕；放大后可拖动查看边缘，手势缩小的下限始终是初始适配尺寸。
+struct DriveFullscreenVideoSurface: View {
+    let player: AVPlayer
+    let presentationSize: CGSize
+    let onTap: (() -> Void)?
+
+    @State private var zoom = DriveVideoPreviewZoomState()
+    @State private var offset: CGSize = .zero
+    @GestureState private var liveMagnification: CGFloat = 1
+    @GestureState private var liveOffset: CGSize = .zero
+
+    init(
+        player: AVPlayer,
+        presentationSize: CGSize,
+        onTap: (() -> Void)? = nil
+    ) {
+        self.player = player
+        self.presentationSize = presentationSize
+        self.onTap = onTap
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let fittedSize = DriveVideoPreviewLayout.filledSize(
+                mediaSize: presentationSize,
+                containerSize: proxy.size
+            )
+            let effectiveScale = zoom.boundedScale(liveMagnification)
+
+            DriveVideoSurface(player: player, videoGravity: .resizeAspect)
+                .frame(width: fittedSize.width, height: fittedSize.height)
+                .scaleEffect(effectiveScale)
+                .offset(
+                    x: offset.width + liveOffset.width,
+                    y: offset.height + liveOffset.height
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(videoGesture(fittedSize: fittedSize, containerSize: proxy.size))
+                .onTapGesture { onTap?() }
+                .clipped()
+                .onChange(of: proxy.size) { _, size in
+                    offset = clampedOffset(
+                        offset,
+                        fittedSize: DriveVideoPreviewLayout.filledSize(
+                            mediaSize: presentationSize,
+                            containerSize: size
+                        ),
+                        containerSize: size,
+                        scale: zoom.scale
+                    )
+                }
+        }
+        .background(Color.black)
+        .onChange(of: presentationSize) { _, _ in
+            // 从占位比例切换到真实视频比例时恢复初始显示，避免沿用旧画面的缩放和偏移。
+            zoom = DriveVideoPreviewZoomState()
+            offset = .zero
+        }
+    }
+
+    private func videoGesture(fittedSize: CGSize, containerSize: CGSize) -> some Gesture {
+        SimultaneousGesture(
+            MagnificationGesture()
+                .updating($liveMagnification) { value, state, _ in
+                    state = value
+                }
+                .onEnded { value in
+                    zoom.applyMagnification(value)
+                    offset = clampedOffset(
+                        offset,
+                        fittedSize: fittedSize,
+                        containerSize: containerSize,
+                        scale: zoom.scale
+                    )
+                },
+            DragGesture()
+                .updating($liveOffset) { value, state, _ in
+                    let scale = zoom.boundedScale(liveMagnification)
+                    guard scale > DriveVideoPreviewZoomState.minimumScale else { return }
+                    let clamped = clampedOffset(
+                        CGSize(
+                            width: offset.width + value.translation.width,
+                            height: offset.height + value.translation.height
+                        ),
+                        fittedSize: fittedSize,
+                        containerSize: containerSize,
+                        scale: scale
+                    )
+                    state = CGSize(
+                        width: clamped.width - offset.width,
+                        height: clamped.height - offset.height
+                    )
+                }
+                .onEnded { value in
+                    let scale = zoom.boundedScale(liveMagnification)
+                    offset = clampedOffset(
+                        CGSize(
+                            width: offset.width + value.translation.width,
+                            height: offset.height + value.translation.height
+                        ),
+                        fittedSize: fittedSize,
+                        containerSize: containerSize,
+                        scale: scale
+                    )
+                }
+        )
+    }
+
+    private func clampedOffset(
+        _ candidate: CGSize,
+        fittedSize: CGSize,
+        containerSize: CGSize,
+        scale: CGFloat
+    ) -> CGSize {
+        let maxX = max((fittedSize.width * scale - containerSize.width) / 2, 0)
+        let maxY = max((fittedSize.height * scale - containerSize.height) / 2, 0)
+        return CGSize(
+            width: min(max(candidate.width, -maxX), maxX),
+            height: min(max(candidate.height, -maxY), maxY)
         )
     }
 }

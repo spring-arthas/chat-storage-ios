@@ -1334,7 +1334,10 @@ private struct DynamicVideoPreviewView: View {
     private func videoContent(player: AVPlayer, fullscreen: Bool) -> some View {
         VStack(spacing: 0) {
             if fullscreen {
-                SecureVideoSurface(player: player)
+                DriveFullscreenVideoSurface(
+                    player: player,
+                    presentationSize: controller.presentationSizeState.size
+                )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 // [修改] 动态视频弹窗复用网盘播放框，按 AVPlayer presentationSize 展示真实比例。

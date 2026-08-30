@@ -199,8 +199,8 @@ final class AppLaunchUITests: XCTestCase {
         )
     }
 
-    // [修改] 视频预览必须暴露播放、停止、进度及全屏控制，退出全屏后仍回到同一预览页。
-    func testDriveVideoPreviewExposesPlaybackAndFullscreenControls() {
+    // [修改] 网盘视频应直接进入沉浸式全屏播放，退出后回到文件列表，不再先弹出普通预览页。
+    func testDriveVideoOpensDirectlyInFullscreen() {
         let app = XCUIApplication()
         app.launchArguments = ["-uiTestMode", "authenticated"]
         app.launch()
@@ -210,17 +210,18 @@ final class AppLaunchUITests: XCTestCase {
         XCTAssertTrue(video.waitForExistence(timeout: 3))
         video.tap()
 
-        XCTAssertTrue(app.descendants(matching: .any)["drive.preview"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.descendants(matching: .any)["drive.video.play-pause"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.descendants(matching: .any)["drive.video.stop"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)["drive.video.progress"].exists)
-
-        app.descendants(matching: .any)["drive.video.fullscreen"].tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["drive.video.fullscreen-view"].waitForExistence(timeout: 3)
         )
-        app.descendants(matching: .any)["drive.video.exit-fullscreen"].tap()
-        XCTAssertTrue(app.descendants(matching: .any)["drive.preview"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.descendants(matching: .any)["drive.preview"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["drive.video.play-pause"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)["drive.video.stop"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["drive.video.progress"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["drive.video.close-to-list"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["drive.video.orientation"].exists)
+
+        app.descendants(matching: .any)["drive.video.close-to-list"].tap()
+        XCTAssertTrue(video.waitForExistence(timeout: 3))
     }
 
     func testChatOpensFriendDetailsAndPinMenu() {

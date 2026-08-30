@@ -29,6 +29,22 @@ enum AppOrientationController {
             window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         }
     }
+
+    // 全屏播放器主动切换横竖屏，不依赖用户转动设备。
+    static func toggleVideoPlaybackOrientation() {
+        guard videoFullscreen,
+              let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.activationState == .foregroundActive }) else { return }
+        let nextOrientation: UIInterfaceOrientationMask = scene.interfaceOrientation.isLandscape
+            ? .portrait
+            : .landscapeRight
+        let preferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: nextOrientation)
+        scene.requestGeometryUpdate(preferences) { _ in }
+        for window in scene.windows {
+            window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
+    }
 }
 
 final class ChatStorageAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {

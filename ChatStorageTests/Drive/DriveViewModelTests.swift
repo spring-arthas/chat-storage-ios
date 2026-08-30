@@ -169,6 +169,16 @@ final class DriveViewModelTests: XCTestCase {
         XCTAssertEqual(zoom.scale, 1, accuracy: 0.001)
     }
 
+    func testFullscreenVideoZoomStaysWithinInitialAndMaximumScale() {
+        var zoom = DriveVideoPreviewZoomState()
+
+        zoom.applyMagnification(10)
+        XCTAssertEqual(zoom.scale, DriveVideoPreviewZoomState.maximumScale, accuracy: 0.001)
+
+        zoom.applyMagnification(0.01)
+        XCTAssertEqual(zoom.scale, DriveVideoPreviewZoomState.minimumScale, accuracy: 0.001)
+    }
+
     func testVideoPreviewFillsContainerWidthWhilePreservingFirstFrameRatio() {
         let fitted = DriveVideoPreviewLayout.filledSize(
             mediaSize: CGSize(width: 1_920, height: 1_080),

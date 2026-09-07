@@ -7,6 +7,8 @@ final class ProfileSettingsViewModel {
     private(set) var notificationStatus: NotificationPermissionStatus = .notDetermined
     private(set) var storageUsage: LocalStorageUsage = .zero
     private(set) var isLoading = false
+    private(set) var isClearingStorage = false
+    private(set) var lastCleanupReleasedBytes: Int64?
     private(set) var errorMessage: String?
 
     private let notificationProvider: any NotificationPermissionProviding
@@ -40,6 +42,7 @@ final class ProfileSettingsViewModel {
     func clearDownloads() async {
         do {
             try await storageManager.clearDownloads()
+            lastCleanupReleasedBytes = nil
             await refreshStorageUsage()
         } catch {
             errorMessage = "下载缓存清理失败"
@@ -49,12 +52,39 @@ final class ProfileSettingsViewModel {
     func clearChatBackgrounds() async {
         do {
             try await storageManager.clearChatBackgrounds()
+            lastCleanupReleasedBytes = nil
             await refreshStorageUsage()
         } catch {
             errorMessage = "聊天背景清理失败"
         }
     }
 
+    func clearReclaimableStorage() async {
+        await clearReclaimableStorage(cleaningFinishedTransfers: {})
+    }
+
+    // [修改] 清理前后均扫描真实目录；已结束传输残留和缓存的释放量会合并展示。
+    func clearReclaimableStorage(
+        cleaningFinishedTransfers: @escaping @MainActor () async -> Void
+    ) async {
+        guard !isClearingStorage else { return }
+        isClearingStorage = true
+        errorMessage = nil
+        defer { isClearingStorage = false }
+        do {
+            let beforeUsage = try await storageManager.usage()
+            storageUsage = beforeUsage
+            await cleaningFinishedTransfers()
+            try await storageManager.clearReclaimableStorage()
+            let usage = try await storageManager.usage()
+            storageUsage = usage
+            lastCleanupReleasedBytes = max(0, beforeUsage.totalBytes - usage.totalBytes)
+        } catch {
+            errorMessage = "本地存储清理失败"
+        }
+    }
+
+    func clearCleanupResult() { lastCleanupReleasedBytes = nil }
     func clearError() { errorMessage = nil }
 
     private func refreshStorageUsage() async {

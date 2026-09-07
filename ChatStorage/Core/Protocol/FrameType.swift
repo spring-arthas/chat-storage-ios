@@ -7,6 +7,8 @@ enum FrameType: UInt8, CaseIterable, Sendable {
     case acknowledgement = 0x04
     case resumeCheck = 0x05
     case resumeAcknowledgement = 0x06
+    // [修改] 客户端删除上传任务时通知服务端清理断点和部分文件，避免孤儿文件占用磁盘。
+    case uploadAbort = 0x07
 
     case directoryCreateRequest = 0x10
     case directoryDeleteRequest = 0x11

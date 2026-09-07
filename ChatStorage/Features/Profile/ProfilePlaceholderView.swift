@@ -150,7 +150,9 @@ struct ProfilePlaceholderView: View {
                 SettingsRow(title: "通知", detail: model.notificationStatus.title, systemImage: "bell.fill")
             }
             NavigationLink {
-                StorageSettingsView(model: model)
+                StorageSettingsView(model: model) {
+                    await transferModel.clearFinished()
+                }
             } label: {
                 SettingsRow(title: "存储空间", detail: formatted(model.storageUsage.totalBytes), systemImage: "internaldrive.fill")
             }
@@ -405,28 +407,83 @@ private struct NotificationSettingsView: View {
 
 private struct StorageSettingsView: View {
     let model: ProfileSettingsViewModel
+    let clearFinishedTransfers: @MainActor () async -> Void
+    @State private var showsClearConfirmation = false
 
     var body: some View {
         Form {
             Section("本地占用") {
-                LabeledContent("下载与预览缓存", value: formatted(model.storageUsage.downloadBytes))
-                LabeledContent("聊天背景", value: formatted(model.storageUsage.backgroundBytes))
-                LabeledContent("断点传输文件", value: formatted(model.storageUsage.transferBytes))
+                usageRow("网盘下载", usage: model.storageUsage.driveDownloads, systemImage: "arrow.down.doc.fill")
+                usageRow("聊天附件缓存", usage: model.storageUsage.chatAttachmentCache, systemImage: "bubble.left.and.bubble.right.fill")
+                usageRow("网盘预览缓存", usage: model.storageUsage.drivePreviewCache, systemImage: "eye.fill")
+                usageRow("文件缩略图", usage: model.storageUsage.driveThumbnailCache, systemImage: "photo.on.rectangle.angled")
+                usageRow("聊天背景", usage: model.storageUsage.chatBackgrounds, systemImage: "photo.fill")
+                usageRow("断点传输文件", usage: model.storageUsage.transferSources, systemImage: "arrow.up.arrow.down.circle.fill")
+                usageRow("动态草稿附件", usage: model.storageUsage.dynamicDraftMedia, systemImage: "square.and.pencil")
+                usageRow("待发送聊天附件", usage: model.storageUsage.outgoingAttachments, systemImage: "paperplane.fill")
                 LabeledContent("合计", value: formatted(model.storageUsage.totalBytes))
             }
-            Section("清理") {
+
+            Section("一键清理") {
+                Button(role: .destructive) {
+                    showsClearConfirmation = true
+                } label: {
+                    HStack {
+                        Label("清理可释放的本地存储", systemImage: "trash.fill")
+                        Spacer()
+                        if model.isClearingStorage { ProgressView() }
+                    }
+                }
+                .disabled(model.isClearingStorage)
+                Text("清理网盘下载、预览缓存、缩略图、聊天附件缓存、聊天背景，以及已完成、失败和已取消传输任务的残留文件。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("单项清理") {
                 Button("清理下载与预览缓存", role: .destructive) { Task { await model.clearDownloads() } }
                     .disabled(model.storageUsage.downloadBytes == 0)
                 Button("清理全部聊天背景", role: .destructive) { Task { await model.clearChatBackgrounds() } }
                     .disabled(model.storageUsage.backgroundBytes == 0)
             }
             Section {
-                Text("断点传输文件由传输中心管理，未完成任务不会在这里被删除。")
+                Text("正在传输、暂停中的断点文件，以及动态草稿和待发送附件会保留，避免丢失内容或无法续传。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("存储空间")
+        .confirmationDialog("清理可释放的本地存储？", isPresented: $showsClearConfirmation) {
+            Button("立即清理", role: .destructive) {
+                Task {
+                    await model.clearReclaimableStorage(cleaningFinishedTransfers: clearFinishedTransfers)
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("正在传输、暂停任务、动态草稿和待发送附件会保留。")
+        }
+        .alert("清理完成", isPresented: Binding(
+            get: { model.lastCleanupReleasedBytes != nil },
+            set: { if !$0 { model.clearCleanupResult() } }
+        )) {
+            Button("知道了") { model.clearCleanupResult() }
+        } message: {
+            Text("已释放 \(formatted(model.lastCleanupReleasedBytes ?? 0))。本页占用已按实际文件重新统计，系统“iPhone 储存空间”刷新后会同步更新。")
+        }
+    }
+
+    private func usageRow(_ title: String, usage: LocalStorageDirectoryUsage, systemImage: String) -> some View {
+        LabeledContent {
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(formatted(usage.bytes))
+                Text("\(usage.fileCount) 个文件")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        } label: {
+            Label(title, systemImage: systemImage)
+        }
     }
 
     private func formatted(_ bytes: Int64) -> String {

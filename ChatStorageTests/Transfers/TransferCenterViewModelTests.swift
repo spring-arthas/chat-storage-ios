@@ -315,6 +315,8 @@ final class TransferCenterViewModelTests: XCTestCase {
 
 private actor TransferManagerSpy: TransferManaging {
     private(set) var retriedIDs: [String] = []
+    private(set) var restartedIDs: [String] = []
+    private(set) var deletedIDs: [String] = []
     private(set) var cancelledIDs: [String] = []
     private(set) var cancelAllCount = 0
     private(set) var cleanupCompletedArtifactsCount = 0
@@ -327,6 +329,9 @@ private actor TransferManagerSpy: TransferManaging {
         cleanupCompletedArtifactsCount += 1
         cleanedTaskIDs.append(taskIDs)
     }
+    func resumeInterruptedTransfers() async {}
+    func restart(_ taskId: String) async { restartedIDs.append(taskId) }
+    func deleteTask(_ taskId: String) async { deletedIDs.append(taskId) }
 }
 
 private actor AsyncCleanupGate {
@@ -362,6 +367,9 @@ private actor BlockingCleanupTransferManagerSpy: TransferManaging {
     func cancel(_ taskId: String) async {}
     func cancelAll() async {}
     func cleanupCompletedArtifacts(taskIDs: Set<String>) async throws { await gate.enterAndWait() }
+    func resumeInterruptedTransfers() async {}
+    func restart(_ taskId: String) async {}
+    func deleteTask(_ taskId: String) async {}
 }
 
 private extension TransferTaskRecord {

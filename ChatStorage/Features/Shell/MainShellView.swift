@@ -226,8 +226,12 @@ struct MainShellView: View {
             .onChange(of: selectedTab, initial: true) { _, tab in
                 messageNotificationVisibility.isMessagesTabActive = tab == .messages
             }
-            .onChange(of: scenePhase, initial: true) { _, phase in
+            .onChange(of: scenePhase) { _, phase in
                 messageNotificationVisibility.isSceneActive = phase == .active
+                // [修改] 前台切回时恢复被后台中断的传输任务，避免任务卡在“传输中”但实际无网络活动。
+                if phase == .active {
+                    Task { await transferManager?.resumeInterruptedTransfers() }
+                }
             }
             .onChange(of: user) { _, refreshedUser in
                 // [修改] 会话激活拿到新头像或 token 后同步当前页面用户，运行时凭据已由 registry 原地更新。

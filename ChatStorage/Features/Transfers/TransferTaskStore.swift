@@ -554,6 +554,26 @@ actor FileTransferTaskStore {
         try commit(updatedRecords)
     }
 
+    // [修改] 从头重传时清零已传输字节和速度，保留任务元数据供重试复用。
+    func resetProgress(id: String) throws {
+        guard var task = records[id] else { return }
+        task.transferredBytes = 0
+        task.bytesPerSecond = nil
+        task.errorMessage = nil
+        task.updatedAt = Self.now
+        var updatedRecords = records
+        updatedRecords[id] = task
+        try commit(updatedRecords)
+    }
+
+    // [修改] 异常任务直接从持久化记录中移除，不经过取消终态。
+    func remove(id: String) throws {
+        guard records[id] != nil else { return }
+        var updatedRecords = records
+        updatedRecords.removeValue(forKey: id)
+        try commit(updatedRecords)
+    }
+
     func publishCurrent() { broadcaster.yield(sortedRecords) }
 
     private var sortedRecords: [TransferTaskRecord] {

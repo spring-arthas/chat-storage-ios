@@ -11,6 +11,10 @@ protocol TransferManaging: Sendable {
     func cancel(_ taskId: String) async
     func cancelAll() async
     func cleanupCompletedArtifacts(taskIDs: Set<String>) async throws
+    // [修改] 前台恢复被后台中断的传输；从头重传（清 .part/重置偏移）；直接删除异常任务。
+    func resumeInterruptedTransfers() async
+    func restart(_ taskId: String) async
+    func deleteTask(_ taskId: String) async
 }
 
 // 网盘相册入口专用：先显示一个“正在导入”的持久任务；视频只保存 Photos 资源标识，绝不落盘副本。
@@ -948,6 +952,121 @@ actor TransferManager {
                 await self?.removeActiveDownloadJob(taskId)
             }
         }
+    }
+
+    // [修改] 前台切回时检测被后台中断的任务：状态在执行中但 activeJob 已不存在，
+    // 先重置为排队再重试，避免传输中心永远卡在“传输中”但实际没有网络活动。
+    func resumeInterruptedTransfers() async {
+        let interrupted = await store.all().filter { task in
+            owns(task)
+                && activeJobs[task.id] == nil
+                && [.queued, .hashing, .running, .verifying].contains(task.status)
+        }
+        for task in interrupted {
+            _ = try? await store.transition(
+                id: task.id,
+                to: .queued,
+                allowedFrom: [.hashing, .running, .verifying]
+            )
+            await retry(task.id)
+        }
+    }
+
+    // [修改] 从头重新传输：下载删除 .part 临时文件并清零进度；上传重置本地进度后重试
+    // （服务端 resumeCheck 以服务端已确认字节为准，本地清零不影响正确性）。
+    func restart(_ taskId: String) async {
+        guard activeJobs[taskId] == nil,
+              let record = await store.task(id: taskId),
+              owns(record),
+              record.status != .completed,
+              record.status != .cancelled else { return }
+
+        switch record.direction {
+        case .download:
+            // 删除可能损坏的 .part 文件
+            if let destinationPath = record.destinationPath {
+                let access = try? TransferDestinationResolver.fileAccess(
+                    destinationPath: destinationPath,
+                    destinationRelativePath: record.destinationRelativePath,
+                    bookmarkData: record.destinationDirectoryBookmark
+                )
+                if let partURL = access?.url.appendingPathExtension("part"),
+                   FileManager.default.fileExists(atPath: partURL.path) {
+                    try? FileManager.default.removeItem(at: partURL)
+                }
+            }
+            try? await store.resetProgress(id: taskId)
+            _ = try? await store.transition(
+                id: taskId,
+                to: .queued,
+                allowedFrom: [.failed, .paused, .pausedAuthentication, .hashing, .running, .verifying, .queued]
+            )
+            guard let refreshed = await store.task(id: taskId) else { return }
+            if let destinationPath = refreshed.destinationPath {
+                let destinationURL = (try? TransferDestinationResolver.fileAccess(
+                    destinationPath: destinationPath,
+                    destinationRelativePath: refreshed.destinationRelativePath,
+                    bookmarkData: refreshed.destinationDirectoryBookmark
+                ).url) ?? URL(fileURLWithPath: destinationPath)
+                reserveDownloadDestination(destinationURL, for: taskId)
+            }
+            let job = makeDownloadJob(refreshed)
+            activeJobs[taskId] = .download(job)
+            Task { [weak self] in
+                _ = await job.result
+                await self?.removeActiveDownloadJob(taskId)
+            }
+        case .upload:
+            try? await store.resetProgress(id: taskId)
+            _ = try? await store.transition(
+                id: taskId,
+                to: .queued,
+                allowedFrom: [.failed, .paused, .pausedAuthentication, .hashing, .running, .verifying, .queued]
+            )
+            guard let refreshed = await store.task(id: taskId) else { return }
+            let job: Task<UploadResult, Error>
+            if refreshed.photoLibraryAssetIdentifier == nil {
+                job = makeUploadJob(refreshed)
+            } else {
+                let reservation = await photoLibraryUploadLimiter.reserve()
+                job = makePhotoLibraryUploadJob(refreshed, reservation: reservation)
+            }
+            activeJobs[taskId] = .upload(job)
+            Task { [weak self] in
+                _ = await job.result
+                await self?.removeActiveJob(taskId)
+            }
+        }
+    }
+
+    // [修改] 直接删除异常任务记录和残留文件，用于无法恢复的传输。
+    // 上传任务会先通知服务端清理断点和部分文件，避免孤儿文件占用磁盘。
+    func deleteTask(_ taskId: String) async {
+        guard let record = await store.task(id: taskId), owns(record) else { return }
+        activeJobs[taskId]?.cancel()
+        // [修改] 上传任务：best-effort 通知服务端删除断点和部分文件，5秒超时，失败不阻塞本地删除。
+        if record.direction == .upload, let md5 = record.md5, !md5.isEmpty {
+            let configuration = configuration
+            let identity = credentialStore.current()
+            let uploadEngine = uploadEngine
+            Task {
+                await uploadEngine.abortUpload(
+                    configuration: configuration,
+                    identity: identity,
+                    md5: md5,
+                    taskId: taskId
+                )
+            }
+        }
+        switch record.direction {
+        case .upload:
+            try? removePersistedUploadSource(for: record)
+        case .download:
+            try? removePartialDownload(for: record)
+        }
+        try? await store.remove(id: taskId)
+        activeJobs.removeValue(forKey: taskId)
+        releaseDownloadDestination(for: taskId)
     }
 
     func reschedulePending() async {

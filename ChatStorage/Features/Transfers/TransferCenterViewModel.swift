@@ -74,6 +74,26 @@ final class TransferCenterViewModel {
         await manager.retry(task.id)
     }
 
+    // [修改] 从头重新传输：下载清除 .part 文件，上传重置进度，均从偏移量0开始。
+    func restart(_ task: TransferTaskRecord) async {
+        guard owns(task), let manager else { return }
+        await manager.restart(task.id)
+    }
+
+    // [修改] 直接删除异常任务记录和残留文件，不经过取消终态。
+    func delete(_ task: TransferTaskRecord) async {
+        guard owns(task), let manager else { return }
+        await manager.deleteTask(task.id)
+    }
+
+    func canRestart(_ task: TransferTaskRecord) -> Bool {
+        owns(task) && (task.status == .failed || task.status == .paused || task.status == .pausedAuthentication)
+    }
+
+    func canDelete(_ task: TransferTaskRecord) -> Bool {
+        owns(task) && (task.status == .failed || task.status == .cancelled || task.status == .completed)
+    }
+
     // [修改] 失败任务允许用户放弃，转成已取消后即可随“清理已完成”一起删除。
     func canCancel(_ task: TransferTaskRecord) -> Bool {
         owns(task) && (task.status.isActive || task.status == .failed)

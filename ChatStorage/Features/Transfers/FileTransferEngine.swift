@@ -161,6 +161,13 @@ protocol FileUploading: Sendable {
         onMD5Computed: @escaping @Sendable (String) async throws -> Void,
         onProgress: @escaping @Sendable (TransferProgress) async -> Void
     ) async throws -> UploadResult
+
+    // [修改] 删除上传任务时通知服务端清理断点和部分文件，默认空实现供测试 mock 使用。
+    func abortUpload(configuration: ServerConfiguration, identity: TransferIdentity, md5: String, taskId: String) async
+}
+
+extension FileUploading {
+    func abortUpload(configuration: ServerConfiguration, identity: TransferIdentity, md5: String, taskId: String) async {}
 }
 
 // 相册视频不生成 App 本地副本；先从 Photos 资源流计算元数据，再重新按块读取并发送。
@@ -794,6 +801,38 @@ struct FileUploadEngine: Sendable {
     private static let photoLibraryUploadChunkSize = 1024 * 1024
     private static let photoLibraryAcknowledgementWindow: Int64 = 8 * 1024 * 1024
     private static let maximumRewindCount = 12
+
+    // [修改] 删除上传任务时通知服务端清理断点和部分文件，best-effort，5秒超时，失败不影响本地删除。
+    func abortUpload(configuration: ServerConfiguration, identity: TransferIdentity, md5: String, taskId: String) async {
+        let transport = TimedTransferFrameTransport(base: transportFactory(), timeouts: timeouts)
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await Task.sleep(for: .seconds(5))
+                    throw FileTransferError.timedOut("abortUpload")
+                }
+                group.addTask {
+                    try await transport.connect(host: configuration.host, port: configuration.uploadPort)
+                    let request = UploadAbortRequest(
+                        md5: md5,
+                        userId: identity.userId,
+                        userName: identity.username,
+                        taskId: taskId,
+                        transferToken: identity.transferToken
+                    )
+                    try await transport.send(Frame(type: .uploadAbort, payload: try ProtocolJSON.encoder().encode(request)))
+                    // 不等服务端响应，发完即走，避免阻塞删除操作。
+                    try await Task.sleep(for: .milliseconds(200))
+                    await transport.close()
+                }
+                try await group.next()
+                group.cancelAll()
+            }
+        } catch {
+            // 服务端不可达时静默失败，本地任务仍会被删除；孤儿文件由服务端定时清理兜底。
+            await transport.close()
+        }
+    }
 }
 
 extension FileUploadEngine: FileUploading {}
@@ -1361,6 +1400,15 @@ private struct UploadMetadataRequest: Encodable {
 }
 
 private struct UploadEndRequest: Encodable { let taskId: String }
+
+// [修改] 删除上传任务时通知服务端清理断点和部分文件，避免孤儿文件占用磁盘。
+private struct UploadAbortRequest: Encodable {
+    let md5: String
+    let userId: Int64
+    let userName: String
+    let taskId: String
+    let transferToken: String
+}
 
 private struct DownloadRequest: Encodable {
     let fileId: Int64

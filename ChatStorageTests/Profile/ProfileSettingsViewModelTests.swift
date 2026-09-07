@@ -28,6 +28,31 @@ final class ProfileSettingsViewModelTests: XCTestCase {
         XCTAssertEqual(usage.downloadBytes, 5)
     }
 
+    func testLocalStorageUsageReportsEachStorageCategory() async throws {
+        let directories = try LocalStorageTestDirectories()
+        try directories.write(byteCount: 2, to: directories.downloadsURL, name: "drive.bin")
+        try directories.write(byteCount: 3, to: directories.attachmentsURL, name: "message.jpg")
+        try directories.write(byteCount: 5, to: directories.previewsURL, name: "preview.bin")
+        try directories.write(byteCount: 7, to: directories.thumbnailsURL, name: "thumbnail.jpg")
+        try directories.write(byteCount: 11, to: directories.backgroundsURL, name: "friend.jpg")
+        try directories.write(byteCount: 13, to: directories.transfersURL, name: "upload.mov")
+        try directories.write(byteCount: 17, to: directories.dynamicDraftMediaURL, name: "draft.jpg")
+        try directories.write(byteCount: 19, to: directories.outgoingAttachmentsURL, name: "sending.mov")
+        let manager = directories.makeManager()
+
+        let usage = try await manager.usage()
+
+        XCTAssertEqual(usage.driveDownloads.bytes, 2)
+        XCTAssertEqual(usage.chatAttachmentCache.bytes, 3)
+        XCTAssertEqual(usage.drivePreviewCache.bytes, 5)
+        XCTAssertEqual(usage.driveThumbnailCache.bytes, 7)
+        XCTAssertEqual(usage.chatBackgrounds.bytes, 11)
+        XCTAssertEqual(usage.transferSources.bytes, 13)
+        XCTAssertEqual(usage.dynamicDraftMedia.bytes, 17)
+        XCTAssertEqual(usage.outgoingAttachments.bytes, 19)
+        XCTAssertEqual(usage.totalBytes, 77)
+    }
+
     func testClearDownloadsRemovesDrivePreviewAndThumbnailCaches() async throws {
         let directories = try LocalStorageTestDirectories()
         try directories.write(byteCount: 2, to: directories.downloadsURL, name: "download.bin")
@@ -72,6 +97,33 @@ final class ProfileSettingsViewModelTests: XCTestCase {
 
         XCTAssertEqual(usage.downloadBytes, 2)
         XCTAssertEqual(usage.transferBytes, 21)
+    }
+
+    func testClearReclaimableStorageRemovesSafeFilesAndPreservesTransferFiles() async throws {
+        let directories = try LocalStorageTestDirectories()
+        try directories.write(byteCount: 2, to: directories.downloadsURL, name: "drive.bin")
+        try directories.write(byteCount: 3, to: directories.attachmentsURL, name: "message.jpg")
+        try directories.write(byteCount: 5, to: directories.previewsURL, name: "preview.bin")
+        try directories.write(byteCount: 7, to: directories.thumbnailsURL, name: "thumbnail.jpg")
+        try directories.write(byteCount: 11, to: directories.backgroundsURL, name: "friend.jpg")
+        try directories.write(byteCount: 13, to: directories.downloadsURL, name: "paused.mov.part")
+        try directories.write(byteCount: 17, to: directories.transfersURL, name: "active-upload.mov")
+        try directories.write(byteCount: 19, to: directories.dynamicDraftMediaURL, name: "draft.jpg")
+        try directories.write(byteCount: 23, to: directories.outgoingAttachmentsURL, name: "sending.mov")
+        let manager = directories.makeManager()
+
+        try await manager.clearReclaimableStorage()
+        let usage = try await manager.usage()
+
+        XCTAssertEqual(usage.driveDownloads.bytes, 0)
+        XCTAssertEqual(usage.chatAttachmentCache.bytes, 0)
+        XCTAssertEqual(usage.drivePreviewCache.bytes, 0)
+        XCTAssertEqual(usage.driveThumbnailCache.bytes, 0)
+        XCTAssertEqual(usage.chatBackgrounds.bytes, 0)
+        XCTAssertEqual(usage.transferSources.bytes, 30)
+        XCTAssertEqual(usage.dynamicDraftMedia.bytes, 19)
+        XCTAssertEqual(usage.outgoingAttachments.bytes, 23)
+        XCTAssertEqual(usage.totalBytes, 72)
     }
 
     func testLoadReadsNotificationPermissionAndStorageUsage() async {
@@ -222,6 +274,36 @@ final class ProfileSettingsViewModelTests: XCTestCase {
         XCTAssertEqual(clearCount, 1)
     }
 
+    func testClearReclaimableStorageRefreshesStorageUsageAndReportsReleasedBytes() async {
+        let storage = ProfileStorageManager(usage: LocalStorageUsage(downloadBytes: 10, backgroundBytes: 4, transferBytes: 2))
+        let model = ProfileSettingsViewModel(
+            notificationProvider: ProfileNotificationProvider(status: .authorized, requestedStatus: .authorized),
+            storageManager: storage
+        )
+        await model.load()
+
+        await model.clearReclaimableStorage()
+
+        XCTAssertEqual(model.storageUsage.totalBytes, 2)
+        XCTAssertEqual(model.lastCleanupReleasedBytes, 14)
+    }
+
+    func testOneTapCleanupIncludesReleasedFinishedTransferFiles() async {
+        let storage = ProfileStorageManager(usage: LocalStorageUsage(downloadBytes: 10, backgroundBytes: 4, transferBytes: 6))
+        let model = ProfileSettingsViewModel(
+            notificationProvider: ProfileNotificationProvider(status: .authorized, requestedStatus: .authorized),
+            storageManager: storage
+        )
+        await model.load()
+
+        await model.clearReclaimableStorage {
+            await storage.setTransferBytes(2)
+        }
+
+        XCTAssertEqual(model.storageUsage.totalBytes, 2)
+        XCTAssertEqual(model.lastCleanupReleasedBytes, 18)
+    }
+
     // [修改] 头像缩放和 JPEG 编码由后台处理器完成，最长边不能超过 1024px。
     func testAvatarImageProcessorResizesLargeImageAndEncodesJPEG() async throws {
         let source = UIGraphicsImageRenderer(size: CGSize(width: 2048, height: 1024)).image { context in
@@ -255,6 +337,8 @@ private struct LocalStorageTestDirectories {
     let thumbnailsURL: URL
     let backgroundsURL: URL
     let transfersURL: URL
+    let dynamicDraftMediaURL: URL
+    let outgoingAttachmentsURL: URL
 
     init() throws {
         rootURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -264,6 +348,8 @@ private struct LocalStorageTestDirectories {
         thumbnailsURL = rootURL.appendingPathComponent("thumbnails", isDirectory: true)
         backgroundsURL = rootURL.appendingPathComponent("backgrounds", isDirectory: true)
         transfersURL = rootURL.appendingPathComponent("transfers", isDirectory: true)
+        dynamicDraftMediaURL = rootURL.appendingPathComponent("dynamic-drafts", isDirectory: true)
+        outgoingAttachmentsURL = rootURL.appendingPathComponent("outgoing-attachments", isDirectory: true)
         try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
     }
 
@@ -274,7 +360,9 @@ private struct LocalStorageTestDirectories {
             previewsURL: previewsURL,
             thumbnailsURL: thumbnailsURL,
             backgroundsURL: backgroundsURL,
-            transfersURL: transfersURL
+            transfersURL: transfersURL,
+            dynamicDraftMediaURL: dynamicDraftMediaURL,
+            outgoingAttachmentsURL: outgoingAttachmentsURL
         )
     }
 
@@ -324,6 +412,18 @@ private actor ProfileStorageManager: LocalStorageManaging {
             downloadBytes: currentUsage.downloadBytes,
             backgroundBytes: 0,
             transferBytes: currentUsage.transferBytes
+        )
+    }
+
+    func clearReclaimableStorage() async throws {
+        currentUsage = LocalStorageUsage(downloadBytes: 0, backgroundBytes: 0, transferBytes: currentUsage.transferBytes)
+    }
+
+    func setTransferBytes(_ bytes: Int64) {
+        currentUsage = LocalStorageUsage(
+            downloadBytes: currentUsage.downloadBytes,
+            backgroundBytes: currentUsage.backgroundBytes,
+            transferBytes: bytes
         )
     }
 }

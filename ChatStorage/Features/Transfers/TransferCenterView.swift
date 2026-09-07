@@ -120,12 +120,20 @@ struct TransferCenterView: View {
 
     @ViewBuilder
     private func actionButtons(_ task: TransferTaskRecord) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             switch task.status {
             case .preparing:
                 EmptyView()
             case .failed:
                 Button("重试") { Task { await model.retry(task) } }
+                if model.canRestart(task) {
+                    Button {
+                        Task { await model.restart(task) }
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise.circle.fill")
+                    }
+                    .accessibilityLabel("从头重新传输")
+                }
             case .paused, .pausedAuthentication:
                 Button {
                     Task { await model.retry(task) }
@@ -133,6 +141,14 @@ struct TransferCenterView: View {
                     Image(systemName: "play.circle.fill")
                 }
                 .accessibilityLabel("继续\(directionText(task.direction))任务")
+                if model.canRestart(task) {
+                    Button {
+                        Task { await model.restart(task) }
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise.circle.fill")
+                    }
+                    .accessibilityLabel("从头重新传输")
+                }
             case .queued, .hashing, .running, .verifying:
                 Button {
                     Task { await model.pause(task) }
@@ -148,8 +164,15 @@ struct TransferCenterView: View {
             case .cancelled:
                 EmptyView()
             }
-            // [修改] 永久失败任务可主动放弃，避免无法清理的记录一直滞留。
-            if model.canCancel(task) {
+            // [修改] 永久失败/已取消/已完成任务可直接删除，清理记录和残留文件。
+            if model.canDelete(task) {
+                Button(role: .destructive) {
+                    Task { await model.delete(task) }
+                } label: {
+                    Image(systemName: "trash.circle.fill")
+                }
+                .accessibilityLabel("删除任务")
+            } else if model.canCancel(task) {
                 Button(role: .destructive) {
                     Task { await model.cancel(task) }
                 } label: {

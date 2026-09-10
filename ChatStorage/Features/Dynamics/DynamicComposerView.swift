@@ -219,6 +219,7 @@ struct DynamicComposerView: View {
                 DynamicComposerMediaTile(
                     item: item,
                     onRemove: {
+                        DynamicComposerThumbnailCache.shared.remove(itemID: item.id)
                         DynamicComposerStaging.removeIfManaged(item.localURL)
                         model.removeMedia(itemID: item.id)
                     },
@@ -274,6 +275,8 @@ struct DynamicComposerView: View {
                     failedCount += 1
                     continue
                 }
+                // 文件进入上传器后会被移动，先在本地提取缩略图缓存，保证待上传卡片有画面。
+                await DynamicComposerMediaThumbnailLoader.preheat(itemID: itemID, fileURL: value.url, kind: .image)
                 if !(await model.finishLocalMediaUpload(itemID: itemID, sourceURL: value.url)) {
                     failedCount += 1
                 }
@@ -328,6 +331,8 @@ struct DynamicComposerView: View {
                     failedCount += 1
                     continue
                 }
+                // 文件进入上传器后会被移动，先在本地截取首帧缓存，保证待上传卡片显示真实画面。
+                await DynamicComposerMediaThumbnailLoader.preheat(itemID: itemID, fileURL: value.url, kind: .video)
                 if !(await model.finishLocalMediaUpload(itemID: itemID, sourceURL: value.url)) {
                     failedCount += 1
                 }
@@ -344,6 +349,7 @@ struct DynamicComposerView: View {
     }
 
     private func cleanupStagedMedia() {
+        model.mediaItems.forEach { DynamicComposerThumbnailCache.shared.remove(itemID: $0.id) }
         model.mediaItems.map(\.localURL).forEach(DynamicComposerStaging.removeIfManaged)
     }
 
@@ -357,6 +363,9 @@ struct DynamicComposerView: View {
 
 @MainActor
 private struct DynamicComposerMediaTile: View {
+    // 附件卡片固定宽高比（宽:高），所有媒体都在这个固定区域内裁剪显示。
+    private static let tileAspectRatio: CGFloat = 1.35
+
     let item: DynamicComposerMediaItem
     let onRemove: () -> Void
     let onRetry: () -> Void
@@ -386,49 +395,58 @@ private struct DynamicComposerMediaTile: View {
     }
 
     private var mediaPreview: some View {
-        ZStack(alignment: .bottom) {
-            Group {
-                if let previewImage {
-                    Image(uiImage: previewImage)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    // [修改] 缩略图尚未返回时保持中性底色，不能显示误导性的红色视频占位图标。
-                    Color(.systemGray5)
-                    if item.kind == .video {
-                        Image(systemName: "play.fill")
-                            .font(.title2.weight(.semibold))
-                            .foregroundStyle(.white.opacity(0.72))
+        // 用无固有尺寸的 Color.clear 作为尺寸锚点，严格锁定附件卡片的固定宽高比；
+        // 所有媒体内容放进 overlay，只在固定区域内填充裁剪，无法反向撑开或改变区域大小。
+        Color.clear
+            .frame(maxWidth: .infinity)
+            .aspectRatio(Self.tileAspectRatio, contentMode: .fit)
+            .overlay {
+                ZStack(alignment: .bottom) {
+                    Group {
+                        if let previewImage {
+                            Image(uiImage: previewImage)
+                                .resizable()
+                                .scaledToFill()
+                        } else {
+                            Color(.systemGray5)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .blur(radius: item.shouldDimPreview ? 5 : 0)
+                    .clipped()
+                    // 播放按钮居中叠加在预览区上，不受底部状态栏影响
+                    .overlay(alignment: .center) {
+                        if item.kind == .video {
+                            if item.canPreview {
+                                Image(systemName: "play.circle.fill")
+                                    .font(.system(size: 42))
+                                    .foregroundStyle(.white)
+                                    .shadow(radius: 4)
+                            } else {
+                                Image(systemName: "play.fill")
+                                    .font(.title2.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.72))
+                            }
+                        }
+                    }
+
+                    if item.shouldDimPreview {
+                        Color.black.opacity(0.24)
+                    }
+
+                    uploadStatusBar
+
+                    if item.canPreview {
+                        Button(action: onPreview) {
+                            Color.clear
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("预览\(item.localURL.lastPathComponent)")
                     }
                 }
             }
-            .blur(radius: item.shouldDimPreview ? 5 : 0)
-
-            if item.shouldDimPreview {
-                Color.black.opacity(0.24)
-            }
-
-            if item.kind == .video, item.canPreview {
-                Image(systemName: "play.circle.fill")
-                    .font(.system(size: 42))
-                    .foregroundStyle(.white)
-                    .shadow(radius: 4)
-            }
-
-            // [修改] 成功后只取消媒体朦胧层，底部仍保留“上传完成”反馈，与参考效果一致。
-            uploadStatusBar
-
-            if item.canPreview {
-                Button(action: onPreview) {
-                    Color.clear
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("预览\(item.localURL.lastPathComponent)")
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .aspectRatio(1.35, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var uploadStatusBar: some View {
@@ -498,17 +516,21 @@ private struct DynamicComposerMediaTile: View {
 @MainActor
 private enum DynamicComposerMediaThumbnailLoader {
     static func image(for item: DynamicComposerMediaItem) async -> UIImage? {
+        // 优先读取“文件被上传器接管前”预热好的首帧，避免源文件被移动/清理后取不到画面。
+        if let cached = DynamicComposerThumbnailCache.shared.image(for: item.id) {
+            return cached
+        }
         switch item.kind {
         case .image:
-            if item.localURL.isFileURL,
-               let image = UIImage(contentsOfFile: item.localURL.path) {
+            if let fileURL = usableFileURL(item.localURL),
+               let image = UIImage(contentsOfFile: fileURL.path) {
                 return image
             }
             guard let identifier = item.photoLibraryAssetIdentifier else { return nil }
             return await photoLibraryImage(identifier: identifier)
         case .video:
-            if item.localURL.isFileURL, FileManager.default.fileExists(atPath: item.localURL.path) {
-                return await videoImage(from: DynamicComposerVideoAssetBox(AVURLAsset(url: item.localURL)))
+            if let fileURL = usableFileURL(item.localURL) {
+                return await videoImage(from: DynamicComposerVideoAssetBox(AVURLAsset(url: fileURL)))
             }
             guard let identifier = item.photoLibraryAssetIdentifier else { return nil }
             return await photoLibraryVideoImage(identifier: identifier)
@@ -517,14 +539,39 @@ private enum DynamicComposerMediaThumbnailLoader {
         }
     }
 
-    private static func photoLibraryVideoImage(identifier: String) async -> UIImage? {
-        let result = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil)
-        guard let asset = result.firstObject else { return nil }
-        if let image = await photoLibraryImage(for: asset) {
-            return image
+    // 在源文件被上传器 move/清理之前调用，提前提取缩略图写入内存缓存。
+    static func preheat(itemID: UUID, fileURL: URL, kind: DynamicMediaKind) async {
+        guard DynamicComposerThumbnailCache.shared.image(for: itemID) == nil else { return }
+        let image: UIImage?
+        switch kind {
+        case .image:
+            image = UIImage(contentsOfFile: fileURL.path)
+        case .video:
+            image = await videoImage(from: DynamicComposerVideoAssetBox(AVURLAsset(url: fileURL)))
+        case .file:
+            image = nil
         }
+        if let image {
+            DynamicComposerThumbnailCache.shared.store(image, for: itemID)
+        }
+    }
+
+    // /dev/null 等占位路径不是真实媒体文件，文件不存在时也不能读取，统一过滤。
+    private static func usableFileURL(_ url: URL) -> URL? {
+        guard url.isFileURL, url.path != "/dev/null" else { return nil }
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    private static func photoLibraryVideoImage(identifier: String) async -> UIImage? {
+        let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil)
+        guard let asset = fetchResult.firstObject else { return nil }
+        // 方案1：让系统直接生成视频海报帧（自动处理 iCloud 下载、转码、缓存），最可靠。
+        if let poster = await requestPHImage(for: asset) {
+            return poster
+        }
+        // 方案2：系统海报帧失败时，导出 AVAsset 手动截首帧兜底。
         let options = PHVideoRequestOptions()
-        options.deliveryMode = .fastFormat
+        options.deliveryMode = .automatic
         options.isNetworkAccessAllowed = true
         let assetBox = await withCheckedContinuation { continuation in
             PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { avAsset, _, _ in
@@ -538,22 +585,26 @@ private enum DynamicComposerMediaThumbnailLoader {
     private static func photoLibraryImage(identifier: String) async -> UIImage? {
         let result = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil)
         guard let asset = result.firstObject else { return nil }
-        return await photoLibraryImage(for: asset)
+        return await requestPHImage(for: asset)
     }
 
-    private static func photoLibraryImage(for asset: PHAsset) async -> UIImage? {
+    // 统一封装 PHImageManager.requestImage：opportunistic 模式会先回调低清图再回调高清图，
+    // 必须忽略 degraded 中间结果、等到最终结果再 resume，否则首次 nil/低清会让缩略图永久缺失。
+    private static func requestPHImage(for asset: PHAsset) async -> UIImage? {
         let options = PHImageRequestOptions()
-        options.deliveryMode = .highQualityFormat
+        options.deliveryMode = .opportunistic
         options.resizeMode = .fast
         options.isNetworkAccessAllowed = true
         return await withCheckedContinuation { continuation in
+            let box = DynamicComposerImageCallbackBox()
+            box.configure(continuation)
             PHImageManager.default().requestImage(
                 for: asset,
                 targetSize: CGSize(width: 720, height: 720),
                 contentMode: .aspectFill,
                 options: options
-            ) { image, _ in
-                continuation.resume(returning: image)
+            ) { [weak box] image, info in
+                box?.receive(image: image, info: info)
             }
         }
     }
@@ -561,10 +612,26 @@ private enum DynamicComposerMediaThumbnailLoader {
     // [修改] AVFoundation 对象放入受控盒后再交给非隔离缩略图任务，满足 Swift 6 数据竞争检查。
     nonisolated private static func videoImage(from assetBox: DynamicComposerVideoAssetBox) async -> UIImage? {
         guard let asset = assetBox.asset else { return nil }
+        // 截帧前必须先异步加载轨道与时长；相册回调给出的 asset 此时轨道尚未就绪，
+        // 不预加载直接 image(at:) 会对每个时间点都抛错，导致拿不到任何帧。
+        let duration: CMTime
+        do {
+            let tracks = try await asset.load(.tracks)
+            guard tracks.contains(where: { $0.mediaType == .video }) else { return nil }
+            duration = try await asset.load(.duration)
+        } catch {
+            return nil
+        }
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 720, height: 720)
-        for second in [0.0, 1.0, 2.0] {
+        // 放宽时间容差，提升关键帧附近以外时间点的截帧成功率。
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
+        let totalSeconds = max(CMTimeGetSeconds(duration), 0.1)
+        // 从 0.1s 起取，避开第 0 秒常见的黑帧/空帧，并按视频实际时长裁剪候选点。
+        let candidates = [0.1, 0.5, 1.0, 2.0].filter { $0 <= totalSeconds }
+        for second in candidates {
             do {
                 let result = try await generator.image(at: CMTime(seconds: second, preferredTimescale: 600))
                 return UIImage(cgImage: result.image)
@@ -581,6 +648,67 @@ private final class DynamicComposerVideoAssetBox: @unchecked Sendable {
 
     init(_ asset: AVAsset?) {
         self.asset = asset
+    }
+}
+
+// 待上传媒体的首帧缩略图缓存。
+// 源文件在进入传输中心后会被移动甚至清理，View 再按 localURL 读取会落空，
+// 因此在文件被接管前提前提取首帧存在这里，key 为媒体项 ID。
+@MainActor
+final class DynamicComposerThumbnailCache {
+    static let shared = DynamicComposerThumbnailCache()
+    private var images: [UUID: UIImage] = [:]
+
+    private init() {}
+
+    func store(_ image: UIImage, for itemID: UUID) {
+        images[itemID] = image
+    }
+
+    func image(for itemID: UUID) -> UIImage? {
+        images[itemID]
+    }
+
+    func remove(itemID: UUID) {
+        images.removeValue(forKey: itemID)
+    }
+
+    func clear() {
+        images.removeAll()
+    }
+}
+
+// PHImageManager 回调可能在后台队列触发多次，用受控盒持有 continuation 与中间结果，
+// 保证只在最终结果到达时 resume 一次，满足 Swift 6 数据竞争检查。
+private final class DynamicComposerImageCallbackBox: @unchecked Sendable {
+    private var continuation: CheckedContinuation<UIImage?, Never>?
+    private var degradedImage: UIImage?
+    private var didResume = false
+
+    func configure(_ continuation: CheckedContinuation<UIImage?, Never>) {
+        self.continuation = continuation
+    }
+
+    func receive(image: UIImage?, info: [AnyHashable: Any]?) {
+        if let image {
+            let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+            if isDegraded {
+                degradedImage = image
+                return
+            }
+            finish(image)
+        } else if let info,
+                  (info[PHImageCancelledKey] as? Bool) == true
+                    || info[PHImageErrorKey] != nil {
+            finish(degradedImage)
+        }
+    }
+
+    private func finish(_ image: UIImage?) {
+        guard !didResume else { return }
+        didResume = true
+        continuation?.resume(returning: image)
+        continuation = nil
     }
 }
 

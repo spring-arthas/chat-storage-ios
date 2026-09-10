@@ -14,6 +14,10 @@ struct DriveFileEntry: Codable, Equatable, Identifiable, Sendable {
     let modifiedAt: Int64?
     let md5: String?
     let children: [DriveFileEntry]
+    // [修改] 根目录节点附带账号级存储统计：已用字节数、目录总数、文件总数；非根节点为 nil。
+    let totalBytes: Int64?
+    let totalDirectories: Int?
+    let totalFiles: Int64?
 
     init(
         id: Int64,
@@ -28,7 +32,10 @@ struct DriveFileEntry: Codable, Equatable, Identifiable, Sendable {
         createdAt: Int64? = nil,
         modifiedAt: Int64?,
         md5: String? = nil,
-        children: [DriveFileEntry] = []
+        children: [DriveFileEntry] = [],
+        totalBytes: Int64? = nil,
+        totalDirectories: Int? = nil,
+        totalFiles: Int64? = nil
     ) {
         self.id = id
         self.parentId = parentId
@@ -43,6 +50,9 @@ struct DriveFileEntry: Codable, Equatable, Identifiable, Sendable {
         self.modifiedAt = modifiedAt
         self.md5 = md5
         self.children = children
+        self.totalBytes = totalBytes
+        self.totalDirectories = totalDirectories
+        self.totalFiles = totalFiles
     }
 
     init(from decoder: Decoder) throws {
@@ -68,6 +78,10 @@ struct DriveFileEntry: Codable, Equatable, Identifiable, Sendable {
         createdAt = try values.first(Int64.self, ["gmtCreated", "createdAt"])
         modifiedAt = try values.first(Int64.self, ["gmtModified", "modifiedAt"])
         md5 = try values.first(String.self, ["md5"])
+        // [修改] 根目录节点附带账号级存储统计，普通文件/目录节点不返回这些字段。
+        totalBytes = try values.first(Int64.self, ["totalBytes", "totalSize"])
+        totalDirectories = try values.first(Int.self, ["totalDirectories", "directoryCount"])
+        totalFiles = try values.first(Int64.self, ["totalFiles", "fileCount"])
     }
 }
 
@@ -291,5 +305,29 @@ private extension KeyedDecodingContainer where Key == DriveCodingKey {
         if let value = try? first(Int.self, names) { return value != 0 }
         if let value = try? first(String.self, names) { return ["y", "yes", "true", "1"].contains(value.lowercased()) }
         return fallback
+    }
+}
+
+// [修改] 网盘账号级存储统计：已用空间字节数、目录总数、文件总数，由根目录节点附带返回。
+struct DriveStorageStats: Equatable, Sendable {
+    let totalBytes: Int64
+    let totalDirectories: Int
+    let totalFiles: Int64
+
+    init?(root: DriveFileEntry) {
+        guard let totalBytes = root.totalBytes, totalBytes >= 0 else { return nil }
+        self.totalBytes = totalBytes
+        self.totalDirectories = root.totalDirectories ?? 0
+        self.totalFiles = root.totalFiles ?? 0
+    }
+
+    init(totalBytes: Int64, totalDirectories: Int, totalFiles: Int64) {
+        self.totalBytes = totalBytes
+        self.totalDirectories = totalDirectories
+        self.totalFiles = totalFiles
+    }
+
+    var formattedSize: String {
+        ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file)
     }
 }

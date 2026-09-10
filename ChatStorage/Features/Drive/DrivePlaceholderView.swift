@@ -1112,7 +1112,7 @@ struct DrivePlaceholderView: View {
             VStack(alignment: .leading, spacing: 12) {
                 searchBar
                 breadcrumbBar
-                transferCenterLink
+                storageStatsCard
                 smartCollectionsBar
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1366,6 +1366,32 @@ struct DrivePlaceholderView: View {
             .accessibilityIdentifier("drive.tree")
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
+            // [修改] 传输中心从大卡片改为顶部工具栏图标入口，红点角标显示进行中任务数。
+            NavigationLink {
+                TransferCenterView(
+                    store: transferStore,
+                    manager: transferCenterManager,
+                    userId: userId,
+                    serverScopeID: serverScopeID
+                )
+            } label: {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 17, weight: .medium))
+                    if activeTransferCount > 0 {
+                        Text("\(min(activeTransferCount, 99))")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 16, height: 16)
+                            .background(Color.red, in: Circle())
+                            .offset(x: 8, y: -8)
+                    }
+                }
+                .frame(width: 28, height: 28)
+            }
+            .accessibilityLabel("传输中心")
+            .accessibilityIdentifier("drive.transfer-center")
+
             if let downloadedFileStore {
                 NavigationLink {
                     DownloadedFilesView(
@@ -1386,12 +1412,6 @@ struct DrivePlaceholderView: View {
             }
             .accessibilityLabel(isSelecting ? "退出选择" : "选择项目")
             .accessibilityIdentifier("drive.selection")
-
-            Button { toggleDisplayMode() } label: {
-                Image(systemName: displayMode == .list ? "square.grid.2x2" : "list.bullet")
-            }
-            .accessibilityLabel(displayMode == .list ? "切换网格" : "切换列表")
-            .accessibilityIdentifier("drive.display-mode")
         }
     }
 
@@ -1428,6 +1448,18 @@ struct DrivePlaceholderView: View {
                 }
                 .accessibilityLabel("返回上级")
                 .accessibilityIdentifier("drive.back")
+
+                // [修改] 首页按钮，深层目录下一键回到根目录，避免逐级返回。
+                Button {
+                    if let rootId = model.path.first?.id {
+                        Task { await model.selectDirectory(id: rootId) }
+                    }
+                } label: {
+                    Image(systemName: "house.fill")
+                        .foregroundStyle(AppTheme.primaryGreen)
+                }
+                .accessibilityLabel("回到根目录")
+                .accessibilityIdentifier("drive.home")
             }
             Menu {
                 ForEach(model.path) { directory in
@@ -1469,76 +1501,112 @@ struct DrivePlaceholderView: View {
         .frame(minHeight: 32)
     }
 
-    private var transferCenterLink: some View {
-        NavigationLink {
-            TransferCenterView(
-                store: transferStore,
-                manager: transferCenterManager,
-                userId: userId,
-                serverScopeID: serverScopeID
-            )
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "arrow.up.arrow.down.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(AppTheme.documentBlue)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("传输中心").font(.subheadline.weight(.semibold))
-                    Text(activeTransferCount > 0 ? "\(activeTransferCount) 个任务正在传输" : "查看上传、下载、暂停和失败任务")
-                        .font(.caption)
+    // [修改] 网盘账号级存储统计概览：已用空间、文件夹总数、文件总数，数据来自根目录节点。
+    @ViewBuilder
+    private var storageStatsCard: some View {
+        if let stats = model.storageStats {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 4) {
+                    Image(systemName: "internaldrive")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(AppTheme.primaryGreen)
+                    Text("存储概览")
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
+                    Spacer()
                 }
-                Spacer()
-                if activeTransferCount > 0 {
-                    // 红色角标显示所有正在排队或传输中的上传、下载任务总数。
-                    Text("\(activeTransferCount)")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Color.red, in: Capsule())
-                        .accessibilityIdentifier("drive.transfer-badge")
+
+                HStack(spacing: 0) {
+                    statColumn(
+                        icon: "internaldrive",
+                        value: stats.formattedSize,
+                        label: "已用空间",
+                        color: AppTheme.primaryGreen
+                    )
+                    statDivider
+                    statColumn(
+                        icon: "folder.fill",
+                        value: "\(stats.totalDirectories)",
+                        label: "文件夹",
+                        color: AppTheme.documentBlue
+                    )
+                    statDivider
+                    statColumn(
+                        icon: "doc.fill",
+                        value: "\(stats.totalFiles)",
+                        label: "文件",
+                        color: AppTheme.mediaCoral
+                    )
                 }
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
             }
-            .padding(12)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+            .padding(14)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+            .accessibilityIdentifier("drive.storage-stats")
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("drive.transfer-center")
     }
 
-    // [修改] 集合栏属于固定顶部区域，滚动目录和文件时始终可见。
-    private var smartCollectionsBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(DriveSmartCollection.allCases) { collection in
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            model.smartCollection = collection
-                        }
-                    } label: {
-                        Label(collection.title, systemImage: collection.systemImage)
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .foregroundStyle(model.smartCollection == collection ? .white : AppTheme.primaryGreen)
-                            .background(
-                                model.smartCollection == collection
-                                    ? AppTheme.primaryGreen
-                                    : Color(.secondarySystemBackground),
-                                in: Capsule()
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("drive.collection.\(collection.rawValue)")
-                    .accessibilityAddTraits(model.smartCollection == collection ? .isSelected : [])
-                }
-            }
+    private var statDivider: some View {
+        Rectangle()
+            .fill(Color(.separator).opacity(0.4))
+            .frame(width: 1, height: 36)
+    }
+
+    private func statColumn(icon: String, value: String, label: String, color: Color) -> some View {
+        VStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(color)
+            Text(value)
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
-        .accessibilityIdentifier("drive.smart-collections")
+        .frame(maxWidth: .infinity)
+    }
+
+    // [修改] 集合栏改为纯图标按钮，5个分类等宽排列无需横向滚动；右侧附带显示模式切换。
+    private var smartCollectionsBar: some View {
+        HStack(spacing: 8) {
+            ForEach(DriveSmartCollection.allCases) { collection in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        model.smartCollection = collection
+                    }
+                } label: {
+                    Image(systemName: collection.systemImage)
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 38)
+                        .foregroundStyle(model.smartCollection == collection ? .white : AppTheme.primaryGreen)
+                        .background(
+                            model.smartCollection == collection
+                                ? AppTheme.primaryGreen
+                                : Color(.secondarySystemBackground),
+                            in: RoundedRectangle(cornerRadius: 10)
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(collection.title)
+                .accessibilityIdentifier("drive.collection.\(collection.rawValue)")
+                .accessibilityAddTraits(model.smartCollection == collection ? .isSelected : [])
+            }
+
+            // [修改] 显示模式切换从顶部工具栏移至分类栏右侧，减少顶部图标数量。
+            Button { toggleDisplayMode() } label: {
+                Image(systemName: displayMode == .list ? "square.grid.2x2" : "list.bullet")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 38, height: 38)
+                    .foregroundStyle(AppTheme.primaryGreen)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(displayMode == .list ? "切换网格" : "切换列表")
+            .accessibilityIdentifier("drive.display-mode")
+        }
     }
 
     @ViewBuilder

@@ -110,6 +110,8 @@ final class DriveViewModel {
     private(set) var totalCount: Int64 = 0
     private(set) var selectedEntryIDs: Set<Int64> = []
     private(set) var loadingDirectoryIDs: Set<Int64> = []
+    // [修改] 根目录节点附带的账号级存储统计：已用空间、目录总数、文件总数。
+    private(set) var storageStats: DriveStorageStats?
     var searchText = ""
     var smartCollection: DriveSmartCollection = .all {
         didSet { selectedEntryIDs.removeAll() }
@@ -892,6 +894,10 @@ final class DriveViewModel {
               directoryTreeGeneration == treeGeneration else { return false }
         directoryRoots = refreshedRoots
         loadedDirectoryIDs = refreshedLoadedDirectoryIDs
+        // [修改] 从根目录节点提取账号级存储统计，普通节点为 nil 时保留上一次成功结果。
+        if let stats = refreshedRoots.first.flatMap(DriveStorageStats.init(root:)) {
+            storageStats = stats
+        }
         if let preferredId, let resolvedPath = Self.path(to: preferredId, in: refreshedRoots) {
             path = resolvedPath
             currentDirectory = resolvedPath.last
@@ -1267,7 +1273,11 @@ private extension DriveFileEntry {
             createdAt: createdAt,
             modifiedAt: modifiedAt,
             md5: md5,
-            children: children
+            children: children,
+            // [修改] 替换子节点时保留根目录附带的账号级存储统计字段。
+            totalBytes: totalBytes,
+            totalDirectories: totalDirectories,
+            totalFiles: totalFiles
         )
     }
 }

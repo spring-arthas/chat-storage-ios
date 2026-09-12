@@ -92,6 +92,19 @@ final class DynamicTimelineViewModelTests: XCTestCase {
         )
     }
 
+    // [修改] 九宫格内视频播放标识必须以各自附件格子的几何中心定位，不能跟随缩略图尺寸漂移。
+    func testDynamicMediaGridVideoOverlayCentersInItsOwnCell() {
+        let bounds = CGRect(x: 0, y: 0, width: 343, height: 343)
+
+        let topRightCenter = DynamicMediaGridLayout.cellCenter(index: 2, count: 9, in: bounds, spacing: 4)
+        XCTAssertEqual(topRightCenter.x, 287.166, accuracy: 0.001)
+        XCTAssertEqual(topRightCenter.y, 55.833, accuracy: 0.001)
+
+        let bottomLeftCenter = DynamicMediaGridLayout.cellCenter(index: 6, count: 9, in: bounds, spacing: 4)
+        XCTAssertEqual(bottomLeftCenter.x, 55.833, accuracy: 0.001)
+        XCTAssertEqual(bottomLeftCenter.y, 287.166, accuracy: 0.001)
+    }
+
     // [修改] 5～9项必须按完整行分配媒体，最后一行不能被懒加载网格测量吞掉。
     func testDynamicMediaGridDistributesItemsIntoCompleteRows() {
         XCTAssertEqual(DynamicMediaGridLayout.rowItemCounts(for: 5), [3, 2])

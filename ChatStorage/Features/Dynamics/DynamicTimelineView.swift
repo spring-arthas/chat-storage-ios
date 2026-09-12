@@ -793,6 +793,63 @@ enum DynamicMediaGridLayout {
             return cellWidth * rowCount + spacing * max(0, rowCount - 1)
         }
     }
+
+    // [修改] 媒体格子的 frame 和中心点由同一套规则计算，播放标识不会随缩略图原始比例漂移。
+    static func cellFrame(index: Int, count: Int, in bounds: CGRect, spacing: CGFloat) -> CGRect {
+        let normalizedCount = min(max(count, 0), maxMediaCount)
+        guard index >= 0, index < normalizedCount, bounds.width > 0 else { return .zero }
+
+        let width = bounds.width
+        switch normalizedCount {
+        case 1:
+            return bounds
+        case 2:
+            let cellWidth = max(0, (width - spacing) / 2)
+            return CGRect(
+                x: bounds.minX + CGFloat(index) * (cellWidth + spacing),
+                y: bounds.minY,
+                width: cellWidth,
+                height: cellWidth
+            )
+        case 3:
+            let cellWidth = max(0, (width - spacing) / 2)
+            if index == 0 {
+                return CGRect(x: bounds.minX, y: bounds.minY, width: cellWidth, height: cellWidth)
+            }
+            let rightHeight = max(0, (cellWidth - spacing) / 2)
+            return CGRect(
+                x: bounds.minX + cellWidth + spacing,
+                y: bounds.minY + CGFloat(index - 1) * (rightHeight + spacing),
+                width: cellWidth,
+                height: rightHeight
+            )
+        case 4:
+            let cellWidth = max(0, (width - spacing) / 2)
+            let row = index / 2
+            let column = index % 2
+            return CGRect(
+                x: bounds.minX + CGFloat(column) * (cellWidth + spacing),
+                y: bounds.minY + CGFloat(row) * (cellWidth + spacing),
+                width: cellWidth,
+                height: cellWidth
+            )
+        default:
+            let cellWidth = max(0, (width - spacing * 2) / 3)
+            let row = index / 3
+            let column = index % 3
+            return CGRect(
+                x: bounds.minX + CGFloat(column) * (cellWidth + spacing),
+                y: bounds.minY + CGFloat(row) * (cellWidth + spacing),
+                width: cellWidth,
+                height: cellWidth
+            )
+        }
+    }
+
+    static func cellCenter(index: Int, count: Int, in bounds: CGRect, spacing: CGFloat) -> CGPoint {
+        let frame = cellFrame(index: index, count: count, in: bounds, spacing: spacing)
+        return CGPoint(x: frame.midX, y: frame.midY)
+    }
 }
 
 // [修改] 媒体数量按 1、2、3、4、5～9 项切换布局，所有格子由同一 Layout 给出确定边界。
@@ -830,7 +887,7 @@ struct DynamicMediaGrid: View {
     }
 }
 
-// [修改] 统一计算1～9项媒体的边界：2项等宽方格，3项左大右上下两格，4项2×2，5～9项三列网格。
+// [修改] 统一计算1～9项媒体的边界：布局与播放标识共用同一套单元格坐标，避免视频按钮错位。
 private struct DynamicMediaMosaicLayout: Layout {
     let spacing: CGFloat
 
@@ -853,61 +910,21 @@ private struct DynamicMediaMosaicLayout: Layout {
         let count = min(subviews.count, DynamicMediaGridLayout.maxMediaCount)
         guard count > 0, width > 0 else { return }
 
-        switch count {
-        case 1:
-            place(subviews[0], in: CGRect(x: bounds.minX, y: bounds.minY, width: width, height: bounds.height))
-        case 2:
-            let cellWidth = max(0, (width - spacing) / 2)
-            place(subviews[0], in: CGRect(x: bounds.minX, y: bounds.minY, width: cellWidth, height: cellWidth))
-            place(subviews[1], in: CGRect(x: bounds.minX + cellWidth + spacing, y: bounds.minY, width: cellWidth, height: cellWidth))
-        case 3:
-            placeThreeItemMosaic(subviews, width: width, bounds: bounds)
-        case 4:
-            placeFourItemGrid(subviews, width: width, bounds: bounds)
-        default:
-            placeThreeColumnGrid(subviews, count: count, width: width, bounds: bounds)
-        }
-    }
-
-    private func placeThreeItemMosaic(_ subviews: Subviews, width: CGFloat, bounds: CGRect) {
-        let cellWidth = max(0, (width - spacing) / 2)
-        place(subviews[0], in: CGRect(x: bounds.minX, y: bounds.minY, width: cellWidth, height: cellWidth))
-        let rightX = bounds.minX + cellWidth + spacing
-        let rightHeight = max(0, (cellWidth - spacing) / 2)
-        place(subviews[1], in: CGRect(x: rightX, y: bounds.minY, width: cellWidth, height: rightHeight))
-        place(subviews[2], in: CGRect(x: rightX, y: bounds.minY + rightHeight + spacing, width: cellWidth, height: rightHeight))
-    }
-
-    private func placeFourItemGrid(_ subviews: Subviews, width: CGFloat, bounds: CGRect) {
-        let cellWidth = max(0, (width - spacing) / 2)
-        for index in 0..<min(4, subviews.count) {
-            let row = index / 2
-            let column = index % 2
-            let origin = CGPoint(
-                x: bounds.minX + CGFloat(column) * (cellWidth + spacing),
-                y: bounds.minY + CGFloat(row) * (cellWidth + spacing)
-            )
-            place(subviews[index], in: CGRect(x: origin.x, y: origin.y, width: cellWidth, height: cellWidth))
-        }
-    }
-
-    private func placeThreeColumnGrid(_ subviews: Subviews, count: Int, width: CGFloat, bounds: CGRect) {
-        let cellWidth = max(0, (width - spacing * 2) / 3)
         for index in 0..<count {
-            let row = index / 3
-            let column = index % 3
-            let origin = CGPoint(
-                x: bounds.minX + CGFloat(column) * (cellWidth + spacing),
-                y: bounds.minY + CGFloat(row) * (cellWidth + spacing)
+            let frame = DynamicMediaGridLayout.cellFrame(
+                index: index,
+                count: count,
+                in: bounds,
+                spacing: spacing
             )
-            place(subviews[index], in: CGRect(x: origin.x, y: origin.y, width: cellWidth, height: cellWidth))
+            place(subviews[index], in: frame)
         }
     }
 
     private func place(_ subview: LayoutSubviews.Element, in frame: CGRect) {
         subview.place(
-            at: frame.origin,
-            anchor: .topLeading,
+            at: CGPoint(x: frame.midX, y: frame.midY),
+            anchor: .center,
             proposal: ProposedViewSize(width: frame.width, height: frame.height)
         )
     }
@@ -924,44 +941,11 @@ private struct DynamicMediaCell: View {
 
     var body: some View {
         Button(action: onOpen) {
-            ZStack {
-                Color(.secondarySystemBackground)
-                if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
-                } else {
-                    LinearGradient(
-                        colors: [placeholderColor.opacity(0.22), placeholderColor.opacity(0.08)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    VStack(spacing: 7) {
-                        Image(systemName: media.kind.symbol)
-                            .font(.system(size: 27, weight: .semibold))
-                        Text(DynamicText.nonBlank(media.fileName) ?? media.kind.title)
-                            .font(.caption2)
-                            .lineLimit(1)
-                            .padding(.horizontal, 8)
-                    }
-                    .foregroundStyle(placeholderColor)
-                }
-
-                if media.kind == .video {
-                    Image(systemName: "play.fill")
-                        .font(.title3.weight(.bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 46, height: 46)
-                        .background(.black.opacity(0.58), in: Circle())
-                }
-
-                if isOpening {
-                    ProgressView()
-                        .tint(.white)
-                        .padding(12)
-                        .background(.black.opacity(0.5), in: Circle())
-                }
-            }
+            // [修改] 用填满布局提案的底图作为基准；播放标识通过独立 center overlay 锁定在当前格子中心。
+            Color(.secondarySystemBackground)
+                .overlay { previewContent }
+                .overlay(alignment: .center) { videoPlayOverlay }
+                .overlay(alignment: .center) { openingOverlay }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
             .contentShape(Rectangle())
@@ -977,6 +961,55 @@ private struct DynamicMediaCell: View {
                   !Task.isCancelled,
                   let image = UIImage(data: data) else { return }
             self.image = image
+        }
+    }
+
+    @ViewBuilder
+    private var previewContent: some View {
+        if let image {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            LinearGradient(
+                colors: [placeholderColor.opacity(0.22), placeholderColor.opacity(0.08)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .overlay {
+                VStack(spacing: 7) {
+                    Image(systemName: media.kind.symbol)
+                        .font(.system(size: 27, weight: .semibold))
+                    Text(DynamicText.nonBlank(media.fileName) ?? media.kind.title)
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .padding(.horizontal, 8)
+                }
+                .foregroundStyle(placeholderColor)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var videoPlayOverlay: some View {
+        if media.kind == .video {
+            Image(systemName: "play.fill")
+                .font(.title3.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 46, height: 46)
+                .background(.black.opacity(0.58), in: Circle())
+                .accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder
+    private var openingOverlay: some View {
+        if isOpening {
+            ProgressView()
+                .tint(.white)
+                .padding(12)
+                .background(.black.opacity(0.5), in: Circle())
         }
     }
 

@@ -3748,13 +3748,13 @@ struct DriveMediaGalleryView: View {
                 if state.entries.isEmpty {
                     ContentUnavailableView("没有可预览的媒体", systemImage: "photo.on.rectangle.angled")
                 } else {
-                    TabView(selection: $selectedIndex) {
-                        ForEach(Array(state.entries.enumerated()), id: \.element.id) { index, entry in
-                            page(for: entry, index: index)
-                                .tag(index)
+                    DrivePageViewController(
+                        entries: state.entries,
+                        selectedIndex: $selectedIndex,
+                        pageContent: { entry, index in
+                            AnyView(page(for: entry, index: index))
                         }
-                    }
-                    .tabViewStyle(.page(indexDisplayMode: .automatic))
+                    )
                 }
             }
             .background(Color.black.ignoresSafeArea())
@@ -3855,6 +3855,106 @@ struct DriveMediaGalleryView: View {
             )
         }
     }
+}
+
+// [修改] 自定义 UIPageViewController 替换 SwiftUI TabView，关闭 bounce，
+// 实现与 iPhone 相册一致的平滑跟手切换，消除滑动切换时的回弹跳动感。
+private struct DrivePageViewController: UIViewControllerRepresentable {
+    let entries: [DriveFileEntry]
+    @Binding var selectedIndex: Int
+    let pageContent: (DriveFileEntry, Int) -> AnyView
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIViewController(context: Context) -> UIPageViewController {
+        let pvc = UIPageViewController(
+            transitionStyle: .scroll,
+            navigationOrientation: .horizontal,
+            options: [.interPageSpacing: 0]
+        )
+        pvc.dataSource = context.coordinator
+        pvc.delegate = context.coordinator
+        context.coordinator.pageViewController = pvc
+        let initial = context.coordinator.makeController(for: selectedIndex)
+        pvc.setViewControllers([initial], direction: .forward, animated: false)
+        return pvc
+    }
+
+    func updateUIViewController(_ pvc: UIPageViewController, context: Context) {
+        context.coordinator.parent = self
+        // 刷新已缓存页面的内容（previews 加载完成后更新）
+        for (index, vc) in context.coordinator.controllers {
+            vc.rootView = pageContent(entries[index], index)
+        }
+        // 外部 selectedIndex 变化时同步翻页
+        if let current = pvc.viewControllers?.first as? DrivePageHostingController,
+           current.index != selectedIndex {
+            let direction: UIPageViewController.NavigationDirection =
+                current.index < selectedIndex ? .forward : .reverse
+            pvc.setViewControllers(
+                [context.coordinator.makeController(for: selectedIndex)],
+                direction: direction,
+                animated: true
+            )
+        }
+        // 关闭底层 scrollView 的 bounce，消除边缘回弹
+        for view in pvc.view.subviews {
+            if let scrollView = view as? UIScrollView {
+                scrollView.bounces = false
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
+        var parent: DrivePageViewController
+        weak var pageViewController: UIPageViewController?
+        var controllers: [Int: DrivePageHostingController] = [:]
+
+        init(_ parent: DrivePageViewController) { self.parent = parent }
+
+        func makeController(for index: Int) -> DrivePageHostingController {
+            if let vc = controllers[index] { return vc }
+            let entry = parent.entries[index]
+            let vc = DrivePageHostingController(rootView: parent.pageContent(entry, index))
+            vc.index = index
+            controllers[index] = vc
+            return vc
+        }
+
+        func pageViewController(
+            _ pageViewController: UIPageViewController,
+            viewControllerBefore viewController: UIViewController
+        ) -> UIViewController? {
+            guard let vc = viewController as? DrivePageHostingController,
+                  vc.index > 0 else { return nil }
+            return makeController(for: vc.index - 1)
+        }
+
+        func pageViewController(
+            _ pageViewController: UIPageViewController,
+            viewControllerAfter viewController: UIViewController
+        ) -> UIViewController? {
+            guard let vc = viewController as? DrivePageHostingController,
+                  vc.index < parent.entries.count - 1 else { return nil }
+            return makeController(for: vc.index + 1)
+        }
+
+        func pageViewController(
+            _ pageViewController: UIPageViewController,
+            didFinishAnimating finished: Bool,
+            previousViewControllers: [UIViewController],
+            transitionCompleted completed: Bool
+        ) {
+            guard completed,
+                  let vc = pageViewController.viewControllers?.first as? DrivePageHostingController
+            else { return }
+            parent.selectedIndex = vc.index
+        }
+    }
+}
+
+private final class DrivePageHostingController: UIHostingController<AnyView> {
+    var index = 0
 }
 
 private struct DriveImagePreviewPage: View {

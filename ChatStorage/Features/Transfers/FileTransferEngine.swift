@@ -1057,13 +1057,16 @@ struct FileDownloadEngine: Sendable {
                     userName: command.ownerUsername ?? command.identity.username,
                     transferToken: command.identity.transferToken
                 )
+                print("[Download] req fileId=\(command.remoteFileId) offset=\(offset) as-user=\(command.ownerUsername ?? command.identity.username)/\(command.ownerUserId ?? command.identity.userId)")
                 try await transport.send(Frame(type: .metadata, payload: try ProtocolJSON.encoder().encode(request)))
 
                 let metadataFrame = try await transport.receive()
+                print("[Download] resp frame=\(metadataFrame.type.rawValue) size=\(metadataFrame.payload.count)B")
                 guard metadataFrame.type == .acknowledgement || metadataFrame.type == .metadata else {
                     throw FileTransferError.invalidResponse("服务端未返回下载元数据")
                 }
                 let metadata = try decodeDownloadMetadata(metadataFrame.payload)
+                print("[Download] meta fileSize=\(metadata.fileSize) start=\(metadata.startOffset)")
                 if let responseTaskId = metadata.taskId, responseTaskId != command.taskId {
                     throw FileTransferError.invalidResponse("服务端下载任务 ID 不匹配")
                 }
@@ -1154,6 +1157,7 @@ struct FileDownloadEngine: Sendable {
                 if !handleClosed { try? handle.close() }
                 await transport.close()
                 if Task.isCancelled { throw CancellationError() }
+                print("[Download] failed fileId=\(command.remoteFileId): \(error)")
                 throw error
             }
         } onCancel: {

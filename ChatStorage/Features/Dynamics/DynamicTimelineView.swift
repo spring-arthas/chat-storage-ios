@@ -915,15 +915,23 @@ private struct DynamicMediaCell: View {
         // [修改] 图片和视频统一走附件预览链路，视频异步生成第一帧后再替换占位图。
         .task(id: media.fileId) {
             guard media.kind != .file, let previewProvider else { return }
-            guard let preview = try? await previewProvider.preview(
-                for: media.chatAttachment,
-                ownerUsername: ownerAuthor?.username,
-                ownerUserId: ownerAuthor?.id
-            ),
-                  let data = try? await DynamicMediaThumbnailRenderer.thumbnailData(for: preview),
-                  !Task.isCancelled,
-                  let image = UIImage(data: data) else { return }
-            self.image = image
+            do {
+                let preview = try await previewProvider.preview(
+                    for: media.chatAttachment,
+                    ownerUsername: ownerAuthor?.username,
+                    ownerUserId: ownerAuthor?.id
+                )
+                guard let data = try? await DynamicMediaThumbnailRenderer.thumbnailData(for: preview),
+                      !Task.isCancelled,
+                      let image = UIImage(data: data) else {
+                    print("[DynCell] thumb-empty fileId=\(media.fileId) kind=\(media.kind.title)")
+                    return
+                }
+                self.image = image
+                print("[DynCell] thumb-ok fileId=\(media.fileId) kind=\(media.kind.title) bytes=\(data.count)")
+            } catch {
+                print("[DynCell] preview-failed fileId=\(media.fileId) kind=\(media.kind.title) err=\(error.localizedDescription)")
+            }
         }
     }
 

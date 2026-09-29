@@ -240,18 +240,38 @@ struct MainShellView: View {
     }
 
     // [修改] Tab 容器与生命周期监听分别类型推断，避免真机构建时单个 body 超过编译器时限。
-    // [修改] 自定义底部 tab bar：SwiftUI TabView 在 iPad 竖屏会把切换栏放到顶部够不着，自己画一个在 iPhone/iPad 都贴底。
-    private var shellTabs: some View {
-        ZStack {
-            switch selectedTab {
-            case .messages: messagesPage
-            case .dynamics: dynamicsPage
-            case .drive: drivePage
-            case .profile: profilePage
+    // [修改] 仅 iPad 用自定义底部 tab bar（VStack 上下排列，不遮挡内容）；iPhone 保持系统原生 TabView 不变。
+    @ViewBuilder private var shellTabs: some View {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            VStack(spacing: 0) {
+                ZStack {
+                    switch selectedTab {
+                    case .messages: messagesPage
+                    case .dynamics: dynamicsPage
+                    case .drive: drivePage
+                    case .profile: profilePage
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                customTabBar
+            }
+        } else {
+            TabView(selection: $selectedTab) {
+                Tab("消息", systemImage: "bubble.left.and.bubble.right.fill", value: MainShellTab.messages) {
+                    messagesPage
+                }
+                .badge(totalUnreadCount)
+                Tab("动态", systemImage: "quote.bubble.fill", value: MainShellTab.dynamics) {
+                    dynamicsPage
+                }
+                Tab("网盘", systemImage: "externaldrive.fill", value: MainShellTab.drive) {
+                    drivePage
+                }
+                Tab("我的", systemImage: "person.crop.circle.fill", value: MainShellTab.profile) {
+                    profilePage
+                }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .safeAreaInset(edge: .bottom) { customTabBar }
     }
 
     private var customTabBar: some View {

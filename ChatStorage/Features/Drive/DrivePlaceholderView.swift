@@ -3913,11 +3913,7 @@ private struct DriveVideoPreviewPage: View {
     var body: some View {
         Group {
             if let player = controller.player {
-                DriveFullscreenVideoSurface(
-                    player: player,
-                    presentationSize: controller.presentationSizeState.size
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                videoContent(player: player)
             } else {
                 ProgressView("加载视频")
                     .tint(.white)
@@ -3927,6 +3923,7 @@ private struct DriveVideoPreviewPage: View {
         .background(Color.black)
         .task { await controller.start(autoplay: true) }
         .onDisappear { controller.invalidate() }
+        // [修改] 视频页垂直下滑退出；横向拖进度条或 TabView 左右切换不会误触发。
         .simultaneousGesture(
             DragGesture(minimumDistance: 24)
                 .onEnded { value in
@@ -3936,5 +3933,108 @@ private struct DriveVideoPreviewPage: View {
                     }
                 }
         )
+    }
+
+    // [修改] 复用无内部手势的 DrivePreviewVideoSurface 渲染视频画面，保证 TabView 左右滑动可正常响应。
+    private func videoContent(player: AVPlayer) -> some View {
+        VStack(spacing: 0) {
+            DrivePreviewVideoSurface(
+                player: player,
+                presentationSize: controller.presentationSizeState.size
+            )
+            controls()
+        }
+        .background(Color.black)
+        .overlay { statusOverlay }
+    }
+
+    private func controls() -> some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Text(Self.time(controller.playbackState.currentTime))
+                    .font(.caption.monospacedDigit())
+                    .frame(minWidth: 42, alignment: .trailing)
+                Slider(
+                    value: Binding(
+                        get: { controller.playbackState.currentTime },
+                        set: { controller.updateScrubbing(to: $0) }
+                    ),
+                    in: 0...controller.playbackState.sliderUpperBound,
+                    onEditingChanged: { editing in
+                        if editing {
+                            controller.beginScrubbing()
+                        } else {
+                            Task { await controller.endScrubbing() }
+                        }
+                    }
+                )
+                .disabled(controller.playbackState.duration <= 0)
+                .tint(AppTheme.primaryGreen)
+                Text(Self.time(controller.playbackState.duration))
+                    .font(.caption.monospacedDigit())
+                    .frame(minWidth: 42, alignment: .leading)
+            }
+
+            HStack(spacing: 18) {
+                Button { Task { await controller.togglePlayback() } } label: {
+                    Image(systemName: controller.playbackState.isPlaying ? "pause.fill" : "play.fill")
+                        .frame(width: 36, height: 32)
+                }
+                .accessibilityLabel(controller.playbackState.isPlaying ? "暂停" : "播放")
+
+                Button { Task { await controller.stop() } } label: {
+                    Image(systemName: "stop.fill").frame(width: 36, height: 32)
+                }
+                .accessibilityLabel("停止")
+
+                Spacer()
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.94))
+    }
+
+    @ViewBuilder
+    private var statusOverlay: some View {
+        switch controller.phase {
+        case .loading:
+            ProgressView("加载视频").tint(.white).foregroundStyle(.white)
+        case .waiting:
+            ProgressView("正在缓冲").tint(.white).foregroundStyle(.white)
+        case .failed(let message):
+            VStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title)
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                Button("重新加载") { Task { await controller.retry() } }
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding(18)
+            .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 14))
+        case .ended:
+            Label("播放结束", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.white)
+                .padding(10)
+                .background(.black.opacity(0.58), in: Capsule())
+        case .idle, .ready:
+            EmptyView()
+        }
+    }
+
+    private static func time(_ value: TimeInterval) -> String {
+        let seconds = max(Int(value.rounded(.down)), 0)
+        let hours = seconds / 3_600
+        let minutes = (seconds % 3_600) / 60
+        let remainder = seconds % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, remainder)
+            : String(format: "%d:%02d", minutes, remainder)
     }
 }

@@ -3753,7 +3753,7 @@ struct DriveMediaGalleryView: View {
                             page(for: entry)
                                 .tag(index)
                                 .task(id: "\(entry.id)-\(selectedIndex)") {
-                                    guard abs(index - selectedIndex) <= 1 else { return }
+                                    guard index == selectedIndex else { return }
                                     await loadPreview(for: entry)
                                 }
                         }
@@ -3913,7 +3913,11 @@ private struct DriveVideoPreviewPage: View {
     var body: some View {
         Group {
             if let player = controller.player {
-                VideoPlayer(player: player)
+                DriveFullscreenVideoSurface(
+                    player: player,
+                    presentationSize: controller.presentationSizeState.size
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ProgressView("加载视频")
                     .tint(.white)

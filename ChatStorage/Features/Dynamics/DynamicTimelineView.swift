@@ -1276,8 +1276,6 @@ struct DynamicMediaGalleryView: View {
 
 // [修改] 图片预览取消固定 padding 和横向滚动，始终按容器比例完整显示整张图片。
 @MainActor
-// [修改] 图片预览支持双指捏合缩放、双击切换 1x/2.5x，放大后可单指拖动查看细节。
-@MainActor
 private struct DynamicImagePreviewView: View {
     let preview: ChatAttachmentPreview
     @State private var image: UIImage?
@@ -1308,14 +1306,13 @@ private struct DynamicImagePreviewView: View {
                     .simultaneousGesture(
                         DragGesture()
                             .onChanged { value in
-                                guard scale > 1.01 else { return }
                                 offset = CGSize(
                                     width: lastOffset.width + value.translation.width,
                                     height: lastOffset.height + value.translation.height
                                 )
                             }
-                            .onEnded { _ in lastOffset = offset }
-                            .disabled(scale <= 1.01)
+                            .onEnded { _ in lastOffset = offset },
+                        isEnabled: scale > 1.01
                     )
                     .onTapGesture(count: 2) {
                         withAnimation(.snappy(duration: 0.22)) {

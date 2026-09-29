@@ -3,13 +3,13 @@ import Network
 
 protocol FileDownloadManaging: Sendable {
     func download(remoteFileId: Int64, fileName: String, fileSize: Int64, destinationURL: URL) async throws -> DownloadResult
-    // [修改] ownerUsername 指定文件归属者（如动态作者）；nil 时使用当前登录用户身份。
-    func download(remoteFileId: Int64, fileName: String, fileSize: Int64, destinationURL: URL, ownerUsername: String?) async throws -> DownloadResult
+    // [修改] ownerUsername/ownerUserId 指定文件归属者（如动态作者）；nil 时使用当前登录用户身份。
+    func download(remoteFileId: Int64, fileName: String, fileSize: Int64, destinationURL: URL, ownerUsername: String?, ownerUserId: Int64?) async throws -> DownloadResult
 }
 
 extension FileDownloadManaging {
     // [修改] 默认实现兼容既有 conformer，不区分归属者。
-    func download(remoteFileId: Int64, fileName: String, fileSize: Int64, destinationURL: URL, ownerUsername: String?) async throws -> DownloadResult {
+    func download(remoteFileId: Int64, fileName: String, fileSize: Int64, destinationURL: URL, ownerUsername: String?, ownerUserId: Int64?) async throws -> DownloadResult {
         try await download(remoteFileId: remoteFileId, fileName: fileName, fileSize: fileSize, destinationURL: destinationURL)
     }
 }
@@ -464,18 +464,20 @@ actor TransferManager {
             fileSize: fileSize,
             destinationURL: destinationURL,
             destinationDirectoryBookmark: destinationDirectoryBookmark,
-            ownerUsername: nil
+            ownerUsername: nil,
+            ownerUserId: nil
         )
     }
 
-    // [修改] 支持按文件归属者身份下载（如好友查看动态图片），ownerUsername 为空时用当前登录用户。
+    // [修改] 支持按文件归属者身份下载（如好友查看动态图片），ownerUsername/ownerUserId 为空时用当前登录用户。
     func download(
         remoteFileId: Int64,
         fileName: String,
         fileSize: Int64,
         destinationURL: URL,
         destinationDirectoryBookmark: Data?,
-        ownerUsername: String?
+        ownerUsername: String?,
+        ownerUserId: Int64?
     ) async throws -> DownloadResult {
         let taskId = UUID().uuidString
         reserveDownloadDestination(destinationURL, for: taskId)
@@ -487,7 +489,8 @@ actor TransferManager {
             fileSize: fileSize,
             destinationURL: destinationURL,
             destinationDirectoryBookmark: destinationDirectoryBookmark,
-            ownerUsername: ownerUsername
+            ownerUsername: ownerUsername,
+            ownerUserId: ownerUserId
         )
     }
 
@@ -498,7 +501,8 @@ actor TransferManager {
         fileSize: Int64,
         destinationURL: URL,
         destinationDirectoryBookmark: Data? = nil,
-        ownerUsername: String? = nil
+        ownerUsername: String? = nil,
+        ownerUserId: Int64? = nil
     ) async throws -> DownloadResult {
         let identity = credentialStore.current()
         let now = Self.now
@@ -538,7 +542,7 @@ actor TransferManager {
             updatedAt: now
         )
         try await store.insert(record)
-        let job = makeDownloadJob(record, ownerUsername: ownerUsername)
+        let job = makeDownloadJob(record, ownerUsername: ownerUsername, ownerUserId: ownerUserId)
         activeJobs[taskId] = .download(job)
         do {
             let result = try await withTaskCancellationHandler {
@@ -796,7 +800,8 @@ actor TransferManager {
                     taskId: taskId,
                     remoteFileId: remoteFileId,
                     expectedFileSize: fileSize,
-                    ownerUsername: nil
+                    ownerUsername: nil,
+                    ownerUserId: nil
                 ),
                 destinationURL: destinationURL,
                 onProgress: { _ in }
@@ -1312,7 +1317,7 @@ actor TransferManager {
         }
     }
 
-    private func makeDownloadJob(_ record: TransferTaskRecord, ownerUsername: String? = nil) -> Task<DownloadResult, Error> {
+    private func makeDownloadJob(_ record: TransferTaskRecord, ownerUsername: String? = nil, ownerUserId: Int64? = nil) -> Task<DownloadResult, Error> {
         let configuration = configuration
         let credentialStore = credentialStore
         let downloadEngine = downloadEngine
@@ -1358,7 +1363,8 @@ actor TransferManager {
                             taskId: record.id,
                             remoteFileId: remoteFileId,
                             expectedFileSize: record.fileSize,
-                            ownerUsername: ownerUsername
+                            ownerUsername: ownerUsername,
+                            ownerUserId: ownerUserId
                         ),
                         destinationURL: destinationAccess.url,
                         onProgress: { progress in

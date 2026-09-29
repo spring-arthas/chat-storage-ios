@@ -81,6 +81,8 @@ struct DownloadCommand: Equatable, Sendable {
     let expectedFileSize: Int64
     // [修改] 文件归属者（如动态作者）；nil 时请求使用当前登录用户身份。
     let ownerUsername: String?
+    // [修改] 文件归属者 userId，与 ownerUsername 配套，保证下载请求身份一致。
+    let ownerUserId: Int64?
 }
 
 struct DownloadResult: Equatable, Sendable {
@@ -1051,7 +1053,7 @@ struct FileDownloadEngine: Sendable {
                     fileId: command.remoteFileId,
                     taskId: command.taskId,
                     startOffset: offset,
-                    userId: command.identity.userId,
+                    userId: command.ownerUserId ?? command.identity.userId,
                     userName: command.ownerUsername ?? command.identity.username,
                     transferToken: command.identity.transferToken
                 )
@@ -1088,7 +1090,8 @@ struct FileDownloadEngine: Sendable {
                             taskId: command.taskId,
                             remoteFileId: command.remoteFileId,
                             expectedFileSize: metadata.fileSize,
-                            ownerUsername: command.ownerUsername
+                            ownerUsername: command.ownerUsername,
+                            ownerUserId: command.ownerUserId
                         ),
                         destinationURL: destinationURL,
                         onProgress: onProgress

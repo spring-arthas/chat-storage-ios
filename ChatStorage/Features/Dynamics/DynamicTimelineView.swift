@@ -1163,6 +1163,30 @@ struct DynamicErrorBanner: View {
     }
 }
 
+// [修改] 底层挂 UISwipeGestureRecognizer(down)：SwiftUI 缩放手势优先消费触摸，图片放大后不会误触发。
+private struct DynamicSwipeDownToDismiss: UIViewControllerRepresentable {
+    let onDismiss: () -> Void
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        let vc = UIViewController()
+        let swipe = UISwipeGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swipedDown))
+        swipe.direction = .down
+        swipe.cancelsTouchesInView = false
+        vc.view.addGestureRecognizer(swipe)
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(onDismiss: onDismiss) }
+
+    final class Coordinator: NSObject {
+        let onDismiss: () -> Void
+        init(onDismiss: @escaping () -> Void) { self.onDismiss = onDismiss }
+        @objc func swipedDown() { onDismiss() }
+    }
+}
+
 // [修改] 动态媒体浏览状态保留同一动态的完整媒体顺序，并从点击项开始分页浏览。
 struct DynamicMediaGalleryState: Identifiable, Equatable {
     let media: [DynamicMedia]
@@ -1184,6 +1208,7 @@ struct DynamicMediaGalleryState: Identifiable, Equatable {
 struct DynamicMediaGalleryView: View {
     let state: DynamicMediaGalleryState
     let previewProvider: (any ChatAttachmentPreviewProviding)?
+    @Environment(\.dismiss) private var dismiss
 
     @State private var selectedIndex: Int
     @State private var previews: [Int64: ChatAttachmentPreview] = [:]
@@ -1221,6 +1246,8 @@ struct DynamicMediaGalleryView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for: .navigationBar)
         }
+        // [修改] 全屏媒体浏览支持下滑关闭：图片未缩放时/视频页下滑退出到动态。
+        .background(DynamicSwipeDownToDismiss { dismiss() })
     }
 
     @ViewBuilder
@@ -1381,7 +1408,6 @@ struct DynamicMediaPreviewSheet: View {
 private struct DynamicVideoPreviewView: View {
     let preview: ChatAttachmentPreview
     @State private var controller: DriveVideoPlaybackController
-    @State private var showsFullscreen = false
 
     init(preview: ChatAttachmentPreview) {
         self.preview = preview
@@ -1398,7 +1424,7 @@ private struct DynamicVideoPreviewView: View {
     var body: some View {
         Group {
             if let player = controller.player {
-                videoContent(player: player, fullscreen: false)
+                videoContent(player: player)
             } else {
                 ProgressView("加载视频")
             }
@@ -1406,43 +1432,22 @@ private struct DynamicVideoPreviewView: View {
         .background(Color.black)
         .task { await controller.start(autoplay: true) }
         .onDisappear { controller.invalidate() }
-        .fullScreenCover(isPresented: $showsFullscreen) {
-            if let player = controller.player {
-                videoContent(player: player, fullscreen: true)
-                    .background(Color.black.ignoresSafeArea())
-                    .statusBarHidden(true)
-                    .overlay(alignment: .topLeading) {
-                        Color.clear
-                            .frame(width: 1, height: 1)
-                            .accessibilityLabel("动态视频全屏播放")
-                            .accessibilityIdentifier("dynamic.video.fullscreen-view")
-                    }
-            }
-        }
     }
 
-    private func videoContent(player: AVPlayer, fullscreen: Bool) -> some View {
+    private func videoContent(player: AVPlayer) -> some View {
         VStack(spacing: 0) {
-            if fullscreen {
-                DriveFullscreenVideoSurface(
-                    player: player,
-                    presentationSize: controller.presentationSizeState.size
-                )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                // [修改] 动态视频弹窗复用网盘播放框，按 AVPlayer presentationSize 展示真实比例。
-                DrivePreviewVideoSurface(
-                    player: player,
-                    presentationSize: controller.presentationSizeState.size
-                )
-            }
-            controls(fullscreen: fullscreen)
+            // [修改] gallery 本身已是全屏，视频直接用预览播放框，不再提供二次全屏按钮。
+            DrivePreviewVideoSurface(
+                player: player,
+                presentationSize: controller.presentationSizeState.size
+            )
+            controls()
         }
         .background(Color.black)
         .overlay { statusOverlay }
     }
 
-    private func controls(fullscreen: Bool) -> some View {
+    private func controls() -> some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
                 Text(Self.time(controller.playbackState.currentTime))
@@ -1485,15 +1490,6 @@ private struct DynamicVideoPreviewView: View {
                 .accessibilityIdentifier("dynamic.video.stop")
 
                 Spacer()
-
-                Button { showsFullscreen = !fullscreen } label: {
-                    Image(systemName: fullscreen
-                        ? "arrow.down.right.and.arrow.up.left"
-                        : "arrow.up.left.and.arrow.down.right")
-                        .frame(width: 36, height: 32)
-                }
-                .accessibilityLabel(fullscreen ? "退出全屏" : "全屏播放")
-                .accessibilityIdentifier(fullscreen ? "dynamic.video.exit-fullscreen" : "dynamic.video.fullscreen")
             }
         }
         .buttonStyle(.plain)

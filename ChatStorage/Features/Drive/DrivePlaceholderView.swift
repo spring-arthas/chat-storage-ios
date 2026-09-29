@@ -3758,6 +3758,7 @@ struct DriveMediaGalleryView: View {
                 }
             }
             .background(Color.black.ignoresSafeArea())
+            .background(PageBounceDisabler())
             .navigationTitle("\(min(selectedIndex + 1, state.entries.count))/\(state.entries.count)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for: .navigationBar)
@@ -3794,10 +3795,13 @@ struct DriveMediaGalleryView: View {
         Group {
             if let preview = previews[entry.id] {
                 content(for: preview)
+                    .transition(.opacity)
             } else {
                 loadingPlaceholder
+                    .transition(.opacity)
             }
         }
+        .animation(.easeOut(duration: 0.18), value: previews[entry.id] != nil)
         .task(id: "current-\(index)") {
             await loadPreview(for: entry)
         }
@@ -3807,10 +3811,13 @@ struct DriveMediaGalleryView: View {
         Group {
             if let preview = previews[entry.id] {
                 DriveImagePreviewPage(url: preview.url)
+                    .transition(.opacity)
             } else {
                 loadingPlaceholder
+                    .transition(.opacity)
             }
         }
+        .animation(.easeOut(duration: 0.18), value: previews[entry.id] != nil)
         .task(id: "adjacent-\(index)") {
             await loadPreview(for: entry)
         }
@@ -3853,6 +3860,37 @@ struct DriveMediaGalleryView: View {
                 url: url,
                 kind: DriveFileOpenRules.isVideo(entry) ? .video : .image
             )
+        }
+    }
+}
+
+// [修改] 关闭 TabView(.page) 底层 UIPageViewController 分页 scrollView 的 bounce，
+// 消除滑动切换时的边缘弹性回弹，与 iPhone 相册行为一致。
+private struct PageBounceDisabler: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        DispatchQueue.main.async { disablePagingBounce() }
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async { disablePagingBounce() }
+    }
+
+    private func disablePagingBounce() {
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let window = scene.windows.first else { return }
+        disableBounce(in: window)
+    }
+
+    private func disableBounce(in view: UIView) {
+        if let scroll = view as? UIScrollView, scroll.isPagingEnabled {
+            scroll.bounces = false
+            scroll.alwaysBounceHorizontal = false
+            return
+        }
+        for subview in view.subviews {
+            disableBounce(in: subview)
         }
     }
 }
@@ -3993,13 +4031,13 @@ private struct DriveVideoPreviewPage: View {
         )
     }
 
-    // [修改] 复用无内部手势的 DrivePreviewVideoSurface 渲染视频画面，保证 TabView 左右滑动可正常响应。
+    // [修改] 网盘全屏浏览使用固定全屏视频容器（相册式）：容器始终铺满屏幕，
+    // 视频按自身比例等比适配，presentationSize 拿到真实尺寸后不再引发容器
+    // 尺寸突变，消除切换完成瞬间的画面跳动/回弹。
     private func videoContent(player: AVPlayer) -> some View {
         VStack(spacing: 0) {
-            DrivePreviewVideoSurface(
-                player: player,
-                presentationSize: controller.presentationSizeState.size
-            )
+            SecureVideoSurface(player: player, videoGravity: .resizeAspect)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             controls()
         }
         .background(Color.black)

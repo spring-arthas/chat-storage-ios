@@ -1321,7 +1321,11 @@ struct DrivePlaceholderView: View {
             }
             .overlay(alignment: .bottomTrailing) {
                 if !isSelecting {
-                    addButton
+                    GeometryReader { proxy in
+                        addButton
+                            .padding(.bottom, 24 + proxy.safeAreaInsets.bottom)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    }
                 }
             }
     }

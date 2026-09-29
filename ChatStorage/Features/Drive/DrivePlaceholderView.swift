@@ -3750,12 +3750,8 @@ struct DriveMediaGalleryView: View {
                 } else {
                     TabView(selection: $selectedIndex) {
                         ForEach(Array(state.entries.enumerated()), id: \.element.id) { index, entry in
-                            page(for: entry)
+                            page(for: entry, index: index)
                                 .tag(index)
-                                .task(id: "\(entry.id)-\(selectedIndex)") {
-                                    guard index == selectedIndex else { return }
-                                    await loadPreview(for: entry)
-                                }
                         }
                     }
                     .tabViewStyle(.page(indexDisplayMode: .automatic))
@@ -3778,24 +3774,67 @@ struct DriveMediaGalleryView: View {
         }
     }
 
+    // [修改] 分页加载调度：快速滑动时同一时间只允许当前页真实加载。
+    // 视频只当前页加载（避免多路视频流并发抢占带宽/服务端并发导致后续页失败）；
+    // 相邻页仅预下载图片（轻量）；其余页面纯占位，不启动任何网络任务。
     @ViewBuilder
-    private func page(for entry: DriveFileEntry) -> some View {
-        if let preview = previews[entry.id] {
-            switch preview.kind {
-            case .image:
-                DriveImagePreviewPage(url: preview.url)
-            case .video:
-                DriveVideoPreviewPage(preview: preview)
-            default:
-                ProgressView("不支持的格式").tint(.white)
-            }
+    private func page(for entry: DriveFileEntry, index: Int) -> some View {
+        let isCurrent = index == selectedIndex
+        let isAdjacent = abs(index - selectedIndex) == 1
+        if isCurrent {
+            currentPage(for: entry, index: index)
+        } else if isAdjacent && !DriveFileOpenRules.isVideo(entry) {
+            adjacentImagePage(for: entry, index: index)
         } else {
-            ProgressView("加载媒体")
-                .tint(.white)
-                .foregroundStyle(.white)
+            loadingPlaceholder
         }
     }
 
+    private func currentPage(for entry: DriveFileEntry, index: Int) -> some View {
+        Group {
+            if let preview = previews[entry.id] {
+                content(for: preview)
+            } else {
+                loadingPlaceholder
+            }
+        }
+        .task(id: "current-\(index)") {
+            await loadPreview(for: entry)
+        }
+    }
+
+    private func adjacentImagePage(for entry: DriveFileEntry, index: Int) -> some View {
+        Group {
+            if let preview = previews[entry.id] {
+                DriveImagePreviewPage(url: preview.url)
+            } else {
+                loadingPlaceholder
+            }
+        }
+        .task(id: "adjacent-\(index)") {
+            await loadPreview(for: entry)
+        }
+    }
+
+    @ViewBuilder
+    private func content(for preview: DrivePreview) -> some View {
+        switch preview.kind {
+        case .image:
+            DriveImagePreviewPage(url: preview.url)
+        case .video:
+            DriveVideoPreviewPage(preview: preview)
+        default:
+            ProgressView("不支持的格式").tint(.white)
+        }
+    }
+
+    private var loadingPlaceholder: some View {
+        ProgressView("加载媒体")
+            .tint(.white)
+            .foregroundStyle(.white)
+    }
+
+    // [修改] 当前页与相邻页共用同一加载入口；previews 缓存保证滑回已加载页不重复下载。
     private func loadPreview(for entry: DriveFileEntry) async {
         guard previews[entry.id] == nil else { return }
         if DriveFileOpenRules.isVideo(entry), let mediaRepository {
@@ -3826,6 +3865,7 @@ private struct DriveImagePreviewPage: View {
     @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
+    @State private var loadFailed = false
 
     var body: some View {
         Group {
@@ -3872,6 +3912,18 @@ private struct DriveImagePreviewPage: View {
                                 if value.translation.height > 110 { dismiss() }
                             }
                     )
+            } else if loadFailed {
+                // [修改] 加载失败给出可重试入口，避免一直停留在加载态。
+                VStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.title)
+                        .foregroundStyle(.orange)
+                    Text("图片加载失败")
+                        .font(.subheadline)
+                        .foregroundStyle(.white)
+                    Button("重试") { loadFailed = false }
+                        .buttonStyle(.borderedProminent)
+                }
             } else {
                 ProgressView("加载图片")
                     .tint(.white)
@@ -3879,11 +3931,17 @@ private struct DriveImagePreviewPage: View {
             }
         }
         .background(Color.black)
-        .task {
+        .task(id: loadFailed ? "failed-\(url.absoluteString)" : "load-\(url.absoluteString)") {
             guard image == nil else { return }
-            if let (data, _) = try? await URLSession.shared.data(from: url),
-               let img = UIImage(data: data) {
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                guard let img = UIImage(data: data) else {
+                    await MainActor.run { loadFailed = true }
+                    return
+                }
                 await MainActor.run { image = img }
+            } catch {
+                await MainActor.run { loadFailed = true }
             }
         }
     }

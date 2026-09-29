@@ -945,7 +945,8 @@ private struct ChatReactionSheet: View {
     let onPick: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     private let emojis = ["😀", "😂", "❤️", "👍", "🎉", "🙏", "😎", "🤔"]
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 4)
+    // [修改] 固定四列改为自适应：iPhone 上仍为四列，iPad 上 sheet 更宽时自动增加列数。
+    private let columns = [GridItem(.adaptive(minimum: 72, maximum: 96), spacing: 12)]
 
     var body: some View {
         NavigationStack {

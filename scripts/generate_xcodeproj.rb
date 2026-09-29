@@ -25,7 +25,8 @@ def set_common_settings(target, bundle_id)
     settings["IPHONEOS_DEPLOYMENT_TARGET"] = "26.0"
     settings["SWIFT_VERSION"] = "6.0"
     settings["CODE_SIGN_STYLE"] = "Automatic"
-    settings["TARGETED_DEVICE_FAMILY"] = "1"
+    # [修改] 支持 iPhone(1) 与 iPad(2)：iPad 原生模式启动即满屏，不再走 iPhone 兼容模式。
+    settings["TARGETED_DEVICE_FAMILY"] = "1,2"
     settings["CLANG_ENABLE_MODULES"] = "YES"
     settings["SWIFT_EMIT_LOC_STRINGS"] = "YES"
   end
@@ -40,6 +41,8 @@ app.build_configurations.each do |config|
   settings["GENERATE_INFOPLIST_FILE"] = "NO"
   settings["INFOPLIST_FILE"] = "ChatStorage/Resources/Info.plist"
   settings["PRODUCT_NAME"] = "ChatStorage"
+  # [修复] 指定 App 图标资源集，确保 Assets.xcassets 中的 AppIcon 被编译进 App
+  settings["ASSETCATALOG_COMPILER_APPICON_NAME"] = "AppIcon"
 end
 
 unit.build_configurations.each do |config|
@@ -55,6 +58,11 @@ ui.build_configurations.each do |config|
 end
 
 project.main_group.new_file("ChatStorage/Resources/Info.plist")
+
+# [修复] 将 Assets.xcassets（含 AppIcon）加入 App 目标的资源构建阶段，
+# 否则重新生成工程后 App 图标丢失、Assets.car 不会生成。
+assets_ref = project.main_group.new_file("ChatStorage/Resources/Assets.xcassets")
+app.add_resources([assets_ref])
 
 def add_swift_sources(project, target, root_dir)
   Dir.glob(File.join(root_dir, "**", "*.swift")).sort.each do |path|

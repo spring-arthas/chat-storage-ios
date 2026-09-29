@@ -12,7 +12,11 @@ enum AppOrientationController {
     }
 
     static func supportedOrientations(videoFullscreen: Bool) -> UIInterfaceOrientationMask {
-        videoFullscreen ? [.portrait, .landscapeLeft, .landscapeRight] : .portrait
+        // [修改] iPad 原生模式支持全部方向：横屏/竖屏放置时界面均满屏自适应，不限制为竖屏。
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            return .all
+        }
+        return videoFullscreen ? [.portrait, .landscapeLeft, .landscapeRight] : .portrait
     }
 
     static func setVideoFullscreen(_ fullscreen: Bool) {

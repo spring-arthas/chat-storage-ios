@@ -211,10 +211,8 @@ struct DynamicComposerView: View {
     }
 
     private var selectedMediaGrid: some View {
-        LazyVGrid(columns: [
-            GridItem(.flexible(), spacing: 10),
-            GridItem(.flexible(), spacing: 10),
-        ], spacing: 10) {
+        // [修改] 固定两列改为自适应：iPhone 宽度下保持两列，iPad 满屏时自动增加列数。
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 260), spacing: 10)], spacing: 10) {
             ForEach(model.mediaItems) { item in
                 DynamicComposerMediaTile(
                     item: item,

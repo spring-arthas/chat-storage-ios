@@ -915,6 +915,7 @@ private struct DynamicMediaCell: View {
         // [修改] 图片和视频统一走附件预览链路，视频异步生成第一帧后再替换占位图。
         .task(id: media.fileId) {
             guard media.kind != .file, let previewProvider else { return }
+            print("[DynCell] render fileId=\(media.fileId) kind=\(media.kind.title) owner=\(ownerAuthor?.username ?? "nil")/\(ownerAuthor?.id ?? -1)")
             do {
                 let preview = try await previewProvider.preview(
                     for: media.chatAttachment,

@@ -83,7 +83,8 @@ struct DynamicTimelineView: View {
                 onPublished: refreshBothTimelines
             )
         }
-        .sheet(item: $mediaGallery) { gallery in
+        // iPad: sheet is a half-height popover on iPad; use fullScreenCover so media browse is immersive.
+        .fullScreenCover(item: $mediaGallery) { gallery in
             DynamicMediaGalleryView(state: gallery, previewProvider: attachmentPreviewProvider)
         }
         .confirmationDialog(
@@ -205,12 +206,24 @@ struct DynamicTimelineView: View {
         Task {
             if selectedScope == .following {
                 await followingModel.delete(postID: candidate.id)
-                if followingModel.errorMessage == nil { await mineModel.refresh() }
+                if followingModel.errorMessage == nil {
+                    await cleanupLocalMediaFiles(for: candidate.media)
+                    await mineModel.refresh()
+                }
             } else {
                 await mineModel.delete(postID: candidate.id)
-                if mineModel.errorMessage == nil { await followingModel.refresh() }
+                if mineModel.errorMessage == nil {
+                    await cleanupLocalMediaFiles(for: candidate.media)
+                    await followingModel.refresh()
+                }
             }
         }
+    }
+
+    // [修改] 服务端删除成功后，同步清理本地已下载的图片预览缓存文件（视频走在线 URL 无本地文件）。
+    private func cleanupLocalMediaFiles(for media: [DynamicMedia]) async {
+        let fileIDs = Set(media.map(\.fileId).filter { $0 > 0 })
+        await attachmentPreviewProvider?.removeCachedFiles(for: fileIDs)
     }
 
     private func refreshBothTimelines() {
@@ -1263,9 +1276,15 @@ struct DynamicMediaGalleryView: View {
 
 // [修改] 图片预览取消固定 padding 和横向滚动，始终按容器比例完整显示整张图片。
 @MainActor
+// [修改] 图片预览支持双指捏合缩放、双击切换 1x/2.5x，放大后可单指拖动查看细节。
+@MainActor
 private struct DynamicImagePreviewView: View {
     let preview: ChatAttachmentPreview
     @State private var image: UIImage?
+    @State private var scale: CGFloat = 1
+    @State private var lastScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
 
     var body: some View {
         Group {
@@ -1274,6 +1293,40 @@ private struct DynamicImagePreviewView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .scaleEffect(scale)
+                    .offset(offset)
+                    .gesture(
+                        MagnifyGesture()
+                            .onChanged { value in
+                                scale = min(max(lastScale * value.magnification, 1), 5)
+                            }
+                            .onEnded { _ in
+                                lastScale = scale
+                                if scale <= 1.01 { resetTransform() }
+                            }
+                    )
+                    .simultaneousGesture(
+                        DragGesture()
+                            .onChanged { value in
+                                guard scale > 1.01 else { return }
+                                offset = CGSize(
+                                    width: lastOffset.width + value.translation.width,
+                                    height: lastOffset.height + value.translation.height
+                                )
+                            }
+                            .onEnded { _ in lastOffset = offset }
+                            .disabled(scale <= 1.01)
+                    )
+                    .onTapGesture(count: 2) {
+                        withAnimation(.snappy(duration: 0.22)) {
+                            if scale > 1.01 {
+                                resetTransform()
+                            } else {
+                                scale = 2.5
+                                lastScale = 2.5
+                            }
+                        }
+                    }
             } else {
                 ProgressView("加载图片")
                     .tint(.white)
@@ -1287,6 +1340,13 @@ private struct DynamicImagePreviewView: View {
                   let image = UIImage(data: data) else { return }
             self.image = image
         }
+    }
+
+    private func resetTransform() {
+        scale = 1
+        lastScale = 1
+        offset = .zero
+        lastOffset = .zero
     }
 }
 

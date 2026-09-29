@@ -214,7 +214,8 @@ struct DynamicDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .task { await loadDetail() }
-        .sheet(item: $mediaGallery) { gallery in
+        // iPad: full screen media browse, consistent with timeline.
+        .fullScreenCover(item: $mediaGallery) { gallery in
             DynamicMediaGalleryView(state: gallery, previewProvider: attachmentPreviewProvider)
         }
         .alert("动态操作失败", isPresented: actionErrorIsPresented) {
@@ -363,9 +364,13 @@ struct DynamicDetailView: View {
     }
 
     private func deletePost() {
+        let media = detailModel.post.media
         Task {
             do {
                 try await repository.delete(dynamicId: detailModel.post.id)
+                // [修改] 服务端删除成功后同步清理本地图片预览缓存文件。
+                let fileIDs = Set(media.map(\.fileId).filter { $0 > 0 })
+                await attachmentPreviewProvider?.removeCachedFiles(for: fileIDs)
                 onDeleted()
                 dismiss()
             } catch {

@@ -45,6 +45,13 @@ enum ChatAttachmentPreviewError: Error, LocalizedError, Sendable {
 
 protocol ChatAttachmentPreviewProviding: Sendable {
     func preview(for attachment: ChatAttachment) async throws -> ChatAttachmentPreview
+    // [修改] 删除动态/消息后清理本地已下载的图片缓存文件，按 fileId 精确匹配。
+    func removeCachedFiles(for fileIDs: Set<Int64>) async
+}
+
+extension ChatAttachmentPreviewProviding {
+    // [修改] 测试 mock 等无本地文件系统的实现保留空操作默认值，不破坏既有 conformer。
+    func removeCachedFiles(for fileIDs: Set<Int64>) async {}
 }
 
 actor DefaultChatAttachmentPreviewProvider: ChatAttachmentPreviewProviding {
@@ -122,6 +129,19 @@ actor DefaultChatAttachmentPreviewProvider: ChatAttachmentPreviewProviding {
         } catch {
             inFlightPreviews.removeValue(forKey: key)
             throw error
+        }
+    }
+
+    // [修改] 动态删除成功后按 fileId 清理本地已下载的图片缓存文件；文件名格式为 "<fileId>-<fileName>"。
+    func removeCachedFiles(for fileIDs: Set<Int64>) async {
+        guard !fileIDs.isEmpty,
+              let entries = try? fileManager.contentsOfDirectory(at: cacheRootURL, includingPropertiesForKeys: nil)
+        else { return }
+        for entry in entries {
+            let filename = entry.lastPathComponent
+            guard let dash = filename.firstIndex(of: "-") else { continue }
+            guard let fileID = Int64(filename[..<dash]), fileIDs.contains(fileID) else { continue }
+            try? fileManager.removeItem(at: entry)
         }
     }
 

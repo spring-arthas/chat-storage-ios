@@ -79,6 +79,8 @@ struct DownloadCommand: Equatable, Sendable {
     let taskId: String
     let remoteFileId: Int64
     let expectedFileSize: Int64
+    // [修改] 文件归属者（如动态作者）；nil 时请求使用当前登录用户身份。
+    let ownerUsername: String?
 }
 
 struct DownloadResult: Equatable, Sendable {
@@ -1050,7 +1052,7 @@ struct FileDownloadEngine: Sendable {
                     taskId: command.taskId,
                     startOffset: offset,
                     userId: command.identity.userId,
-                    userName: command.identity.username,
+                    userName: command.ownerUsername ?? command.identity.username,
                     transferToken: command.identity.transferToken
                 )
                 try await transport.send(Frame(type: .metadata, payload: try ProtocolJSON.encoder().encode(request)))
@@ -1085,7 +1087,8 @@ struct FileDownloadEngine: Sendable {
                             identity: command.identity,
                             taskId: command.taskId,
                             remoteFileId: command.remoteFileId,
-                            expectedFileSize: metadata.fileSize
+                            expectedFileSize: metadata.fileSize,
+                            ownerUsername: command.ownerUsername
                         ),
                         destinationURL: destinationURL,
                         onProgress: onProgress

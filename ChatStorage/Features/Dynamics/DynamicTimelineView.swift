@@ -82,7 +82,7 @@ struct DynamicTimelineView: View {
         }
         // iPad: sheet is a half-height popover on iPad; use fullScreenCover so media browse is immersive.
         .fullScreenCover(item: $mediaGallery) { gallery in
-            DynamicMediaGalleryView(state: gallery, previewProvider: attachmentPreviewProvider)
+            DynamicMediaGalleryView(state: gallery, previewProvider: attachmentPreviewProvider, ownerUsername: gallery.ownerUsername)
         }
         .confirmationDialog(
             "删除这条动态？",
@@ -185,9 +185,9 @@ struct DynamicTimelineView: View {
         )
     }
 
-    private func openMedia(_ media: DynamicMedia, in collection: [DynamicMedia]) {
+    private func openMedia(_ media: DynamicMedia, in collection: [DynamicMedia], owner: String) {
         mediaErrorMessage = nil
-        mediaGallery = DynamicMediaGalleryState(media: collection, selectedMediaID: media.fileId)
+        mediaGallery = DynamicMediaGalleryState(media: collection, selectedMediaID: media.fileId, ownerUsername: owner)
     }
 
     private func deleteCandidate() {
@@ -221,7 +221,7 @@ private struct DynamicTimelineList: View {
     let previewingMediaID: Int64?
     let onCompose: () -> Void
     let onOpenDetail: (DynamicPost) -> Void
-    let onOpenMedia: (DynamicMedia, [DynamicMedia]) -> Void
+    let onOpenMedia: (DynamicMedia, [DynamicMedia], String) -> Void
     let onDelete: (DynamicPost) -> Void
 
     var body: some View {
@@ -409,7 +409,7 @@ struct DynamicPostCard: View {
     let onReply: () -> Void
     let onRepost: () -> Void
     let onLike: () -> Void
-    let onOpenMedia: (DynamicMedia, [DynamicMedia]) -> Void
+    let onOpenMedia: (DynamicMedia, [DynamicMedia], String) -> Void
     let onDelete: (() -> Void)?
 
     @State private var isExpanded = false
@@ -427,14 +427,15 @@ struct DynamicPostCard: View {
                         media: post.media,
                         previewProvider: attachmentPreviewProvider,
                         loadingMediaID: previewingMediaID,
-                        onOpen: { media in onOpenMedia(media, post.media) }
+                        ownerUsername: post.author.username,
+                        onOpen: { media in onOpenMedia(media, post.media, post.author.username) }
                     )
                 }
 
                 if let reference = post.reference {
                     DynamicReferenceCard(
                         reference: reference,
-                        onOpenMedia: { media in onOpenMedia(media, reference.media) }
+                        onOpenMedia: { media in onOpenMedia(media, reference.media, post.author.username) }
                     )
                 }
 
@@ -443,7 +444,7 @@ struct DynamicPostCard: View {
                         post: original,
                         previewProvider: attachmentPreviewProvider,
                         loadingMediaID: previewingMediaID,
-                        onOpenMedia: { media in onOpenMedia(media, original.media) }
+                        onOpenMedia: { media in onOpenMedia(media, original.media, original.author.username) }
                     )
                 }
 
@@ -564,6 +565,7 @@ private struct DynamicEmbeddedPostCard: View {
                     media: post.media,
                     previewProvider: previewProvider,
                     loadingMediaID: loadingMediaID,
+                    ownerUsername: post.author.username,
                     onOpen: onOpenMedia
                 )
             }
@@ -810,6 +812,7 @@ struct DynamicMediaGrid: View {
     let media: [DynamicMedia]
     let previewProvider: (any ChatAttachmentPreviewProviding)?
     let loadingMediaID: Int64?
+    let ownerUsername: String?
     let onOpen: (DynamicMedia) -> Void
 
     private var items: [DynamicMedia] { DynamicMediaGridLayout.visibleMedia(from: media) }
@@ -834,6 +837,7 @@ struct DynamicMediaGrid: View {
             media: item,
             previewProvider: previewProvider,
             isOpening: loadingMediaID == item.fileId,
+            ownerUsername: ownerUsername,
             onOpen: { onOpen(item) }
         )
     }
@@ -887,6 +891,7 @@ private struct DynamicMediaCell: View {
     let media: DynamicMedia
     let previewProvider: (any ChatAttachmentPreviewProviding)?
     let isOpening: Bool
+    let ownerUsername: String?
     let onOpen: () -> Void
 
     @State private var image: UIImage?
@@ -908,7 +913,7 @@ private struct DynamicMediaCell: View {
         // [修改] 图片和视频统一走附件预览链路，视频异步生成第一帧后再替换占位图。
         .task(id: media.fileId) {
             guard media.kind != .file, let previewProvider else { return }
-            guard let preview = try? await previewProvider.preview(for: media.chatAttachment),
+            guard let preview = try? await previewProvider.preview(for: media.chatAttachment, ownerUsername: ownerUsername),
                   let data = try? await DynamicMediaThumbnailRenderer.thumbnailData(for: preview),
                   !Task.isCancelled,
                   let image = UIImage(data: data) else { return }
@@ -1106,15 +1111,18 @@ struct DynamicErrorBanner: View {
 struct DynamicMediaGalleryState: Identifiable, Equatable {
     let media: [DynamicMedia]
     let selectedIndex: Int
+    // [修改] 附件归属者用户名（动态作者），好友查看他人动态附件时用作者身份申请媒体地址。
+    let ownerUsername: String?
 
     var id: String {
         "\(selectedIndex)-" + media.map { String($0.fileId) }.joined(separator: ",")
     }
 
-    init(media: [DynamicMedia], selectedMediaID: Int64) {
+    init(media: [DynamicMedia], selectedMediaID: Int64, ownerUsername: String? = nil) {
         let visibleMedia = DynamicMediaGridLayout.visibleMedia(from: media)
         self.media = visibleMedia
         self.selectedIndex = max(0, visibleMedia.firstIndex(where: { $0.fileId == selectedMediaID }) ?? 0)
+        self.ownerUsername = ownerUsername
     }
 }
 
@@ -1123,15 +1131,22 @@ struct DynamicMediaGalleryState: Identifiable, Equatable {
 struct DynamicMediaGalleryView: View {
     let state: DynamicMediaGalleryState
     let previewProvider: (any ChatAttachmentPreviewProviding)?
+    // [修改] 附件归属者用户名（动态作者），预览/播放请求用作者身份申请媒体地址。
+    let ownerUsername: String?
     @Environment(\.dismiss) private var dismiss
 
     @State private var selectedIndex: Int
     @State private var previews: [Int64: ChatAttachmentPreview] = [:]
     @State private var errors: [Int64: String] = [:]
 
-    init(state: DynamicMediaGalleryState, previewProvider: (any ChatAttachmentPreviewProviding)?) {
+    init(
+        state: DynamicMediaGalleryState,
+        previewProvider: (any ChatAttachmentPreviewProviding)?,
+        ownerUsername: String? = nil
+    ) {
         self.state = state
         self.previewProvider = previewProvider
+        self.ownerUsername = ownerUsername ?? state.ownerUsername
         _selectedIndex = State(initialValue: state.selectedIndex)
     }
 
@@ -1213,7 +1228,7 @@ struct DynamicMediaGalleryView: View {
     ) async {
         guard force || (previews[media.fileId] == nil && errors[media.fileId] == nil) else { return }
         do {
-            let preview = try await previewProvider.preview(for: media.chatAttachment)
+            let preview = try await previewProvider.preview(for: media.chatAttachment, ownerUsername: state.ownerUsername)
             guard !Task.isCancelled else { return }
             previews[media.fileId] = preview
             errors[media.fileId] = nil

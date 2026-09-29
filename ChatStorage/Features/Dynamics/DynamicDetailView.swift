@@ -216,7 +216,7 @@ struct DynamicDetailView: View {
         .task { await loadDetail() }
         // iPad: full screen media browse, consistent with timeline.
         .fullScreenCover(item: $mediaGallery) { gallery in
-            DynamicMediaGalleryView(state: gallery, previewProvider: attachmentPreviewProvider)
+            DynamicMediaGalleryView(state: gallery, previewProvider: attachmentPreviewProvider, ownerUsername: gallery.ownerUsername)
         }
         .alert("动态操作失败", isPresented: actionErrorIsPresented) {
             Button("知道了") { errorMessage = nil }
@@ -379,9 +379,9 @@ struct DynamicDetailView: View {
         }
     }
 
-    private func openMedia(_ media: DynamicMedia, in collection: [DynamicMedia]) {
+    private func openMedia(_ media: DynamicMedia, in collection: [DynamicMedia], owner: String) {
         errorMessage = nil
-        mediaGallery = DynamicMediaGalleryState(media: collection, selectedMediaID: media.fileId)
+        mediaGallery = DynamicMediaGalleryState(media: collection, selectedMediaID: media.fileId, ownerUsername: owner)
     }
 
     private func message(for error: Error) -> String {

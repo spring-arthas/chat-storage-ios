@@ -44,12 +44,17 @@ enum ChatAttachmentPreviewError: Error, LocalizedError, Sendable {
 }
 
 protocol ChatAttachmentPreviewProviding: Sendable {
-    func preview(for attachment: ChatAttachment) async throws -> ChatAttachmentPreview
+    // [修改] ownerUsername 为附件归属者（如动态作者）的用户名；nil 时回退为当前登录用户。
+    func preview(for attachment: ChatAttachment, ownerUsername: String?) async throws -> ChatAttachmentPreview
     // [修改] 删除动态/消息后清理本地已下载的图片缓存文件，按 fileId 精确匹配。
     func removeCachedFiles(for fileIDs: Set<Int64>) async
 }
 
 extension ChatAttachmentPreviewProviding {
+    // [修改] 聊天等不区分归属者的调用保持原签名，owner 为空即当前用户。
+    func preview(for attachment: ChatAttachment) async throws -> ChatAttachmentPreview {
+        try await preview(for: attachment, ownerUsername: nil)
+    }
     // [修改] 测试 mock 等无本地文件系统的实现保留空操作默认值，不破坏既有 conformer。
     func removeCachedFiles(for fileIDs: Set<Int64>) async {}
 }
@@ -92,19 +97,21 @@ actor DefaultChatAttachmentPreviewProvider: ChatAttachmentPreviewProviding {
     }
 
     // [修改] 视频直接使用媒体 Range 地址；其余附件先校验本地完整缓存，再决定是否下载。
-    func preview(for attachment: ChatAttachment) async throws -> ChatAttachmentPreview {
+    // [修改] ownerUsername 指定附件归属者（如动态作者），好友查看他人动态附件时用它申请媒体地址。
+    func preview(for attachment: ChatAttachment, ownerUsername: String?) async throws -> ChatAttachmentPreview {
         guard attachment.fileId > 0 else { throw ChatAttachmentPreviewError.invalidFile }
+        let identity = Self.nonBlank(ownerUsername) ?? username
         if attachment.isVideo {
-            let playback = try await mediaRepository.playback(fileId: attachment.fileId, username: username)
+            let playback = try await mediaRepository.playback(fileId: attachment.fileId, username: identity)
             let mediaRepository = self.mediaRepository
-            let username = self.username
+            let identity = identity
             return ChatAttachmentPreview(
                 attachment: attachment,
                 kind: .video,
                 url: playback.playURL,
                 playback: playback,
                 refreshPlayback: {
-                    try await mediaRepository.playback(fileId: attachment.fileId, username: username)
+                    try await mediaRepository.playback(fileId: attachment.fileId, username: identity)
                 }
             )
         }
@@ -119,7 +126,7 @@ actor DefaultChatAttachmentPreviewProvider: ChatAttachmentPreviewProviding {
             return try await existing.value
         }
         let job = Task {
-            try await downloadLocalPreview(attachment: attachment, destination: destination)
+            try await downloadLocalPreview(attachment: attachment, destination: destination, ownerUsername: identity)
         }
         inFlightPreviews[key] = job
         do {
@@ -130,6 +137,12 @@ actor DefaultChatAttachmentPreviewProvider: ChatAttachmentPreviewProviding {
             inFlightPreviews.removeValue(forKey: key)
             throw error
         }
+    }
+
+    private static func nonBlank(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     // [修改] 动态删除成功后按 fileId 清理本地已下载的图片缓存文件；文件名格式为 "<fileId>-<fileName>"。
@@ -147,7 +160,8 @@ actor DefaultChatAttachmentPreviewProvider: ChatAttachmentPreviewProviding {
 
     private func downloadLocalPreview(
         attachment: ChatAttachment,
-        destination: URL
+        destination: URL,
+        ownerUsername: String? = nil
     ) async throws -> ChatAttachmentPreview {
         if fileManager.fileExists(atPath: destination.path) { try fileManager.removeItem(at: destination) }
         try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -155,7 +169,8 @@ actor DefaultChatAttachmentPreviewProvider: ChatAttachmentPreviewProviding {
             remoteFileId: attachment.fileId,
             fileName: attachment.fileName,
             fileSize: attachment.fileSize,
-            destinationURL: destination
+            destinationURL: destination,
+            ownerUsername: ownerUsername
         )
         guard try isComplete(destination, expectedSize: attachment.fileSize) else {
             throw ChatAttachmentPreviewError.incompleteDownload

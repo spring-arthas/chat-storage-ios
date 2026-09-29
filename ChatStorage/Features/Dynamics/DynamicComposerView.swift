@@ -122,7 +122,7 @@ struct DynamicComposerView: View {
         }
         .sheet(item: $previewingMedia) { state in
             if let attachmentPreviewProvider {
-                DynamicMediaGalleryView(state: state, previewProvider: attachmentPreviewProvider)
+                DynamicMediaGalleryView(state: state, previewProvider: attachmentPreviewProvider, ownerUsername: currentUser.username)
             } else {
                 ContentUnavailableView("当前账号没有可用的媒体预览凭据", systemImage: "lock.slash")
             }

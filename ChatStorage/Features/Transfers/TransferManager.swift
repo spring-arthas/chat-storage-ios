@@ -3,6 +3,15 @@ import Network
 
 protocol FileDownloadManaging: Sendable {
     func download(remoteFileId: Int64, fileName: String, fileSize: Int64, destinationURL: URL) async throws -> DownloadResult
+    // [修改] ownerUsername 指定文件归属者（如动态作者）；nil 时使用当前登录用户身份。
+    func download(remoteFileId: Int64, fileName: String, fileSize: Int64, destinationURL: URL, ownerUsername: String?) async throws -> DownloadResult
+}
+
+extension FileDownloadManaging {
+    // [修改] 默认实现兼容既有 conformer，不区分归属者。
+    func download(remoteFileId: Int64, fileName: String, fileSize: Int64, destinationURL: URL, ownerUsername: String?) async throws -> DownloadResult {
+        try await download(remoteFileId: remoteFileId, fileName: fileName, fileSize: fileSize, destinationURL: destinationURL)
+    }
 }
 
 protocol TransferManaging: Sendable {
@@ -449,6 +458,25 @@ actor TransferManager {
         destinationURL: URL,
         destinationDirectoryBookmark: Data?
     ) async throws -> DownloadResult {
+        try await download(
+            remoteFileId: remoteFileId,
+            fileName: fileName,
+            fileSize: fileSize,
+            destinationURL: destinationURL,
+            destinationDirectoryBookmark: destinationDirectoryBookmark,
+            ownerUsername: nil
+        )
+    }
+
+    // [修改] 支持按文件归属者身份下载（如好友查看动态图片），ownerUsername 为空时用当前登录用户。
+    func download(
+        remoteFileId: Int64,
+        fileName: String,
+        fileSize: Int64,
+        destinationURL: URL,
+        destinationDirectoryBookmark: Data?,
+        ownerUsername: String?
+    ) async throws -> DownloadResult {
         let taskId = UUID().uuidString
         reserveDownloadDestination(destinationURL, for: taskId)
         defer { releaseDownloadDestination(for: taskId) }
@@ -458,7 +486,8 @@ actor TransferManager {
             fileName: fileName,
             fileSize: fileSize,
             destinationURL: destinationURL,
-            destinationDirectoryBookmark: destinationDirectoryBookmark
+            destinationDirectoryBookmark: destinationDirectoryBookmark,
+            ownerUsername: ownerUsername
         )
     }
 
@@ -468,7 +497,8 @@ actor TransferManager {
         fileName: String,
         fileSize: Int64,
         destinationURL: URL,
-        destinationDirectoryBookmark: Data? = nil
+        destinationDirectoryBookmark: Data? = nil,
+        ownerUsername: String? = nil
     ) async throws -> DownloadResult {
         let identity = credentialStore.current()
         let now = Self.now
@@ -508,7 +538,7 @@ actor TransferManager {
             updatedAt: now
         )
         try await store.insert(record)
-        let job = makeDownloadJob(record)
+        let job = makeDownloadJob(record, ownerUsername: ownerUsername)
         activeJobs[taskId] = .download(job)
         do {
             let result = try await withTaskCancellationHandler {
@@ -765,7 +795,8 @@ actor TransferManager {
                     identity: identity,
                     taskId: taskId,
                     remoteFileId: remoteFileId,
-                    expectedFileSize: fileSize
+                    expectedFileSize: fileSize,
+                    ownerUsername: nil
                 ),
                 destinationURL: destinationURL,
                 onProgress: { _ in }
@@ -1281,7 +1312,7 @@ actor TransferManager {
         }
     }
 
-    private func makeDownloadJob(_ record: TransferTaskRecord) -> Task<DownloadResult, Error> {
+    private func makeDownloadJob(_ record: TransferTaskRecord, ownerUsername: String? = nil) -> Task<DownloadResult, Error> {
         let configuration = configuration
         let credentialStore = credentialStore
         let downloadEngine = downloadEngine
@@ -1326,7 +1357,8 @@ actor TransferManager {
                             identity: identity,
                             taskId: record.id,
                             remoteFileId: remoteFileId,
-                            expectedFileSize: record.fileSize
+                            expectedFileSize: record.fileSize,
+                            ownerUsername: ownerUsername
                         ),
                         destinationURL: destinationAccess.url,
                         onProgress: { progress in

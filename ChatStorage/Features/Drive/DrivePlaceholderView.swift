@@ -3757,6 +3757,7 @@ struct DriveMediaGalleryView: View {
                     .tabViewStyle(.page(indexDisplayMode: .automatic))
                 }
             }
+            .transaction { $0.animation = nil }
             .background(Color.black.ignoresSafeArea())
             .background(PageBounceDisabler())
             .navigationTitle("\(min(selectedIndex + 1, state.entries.count))/\(state.entries.count)")
@@ -3847,18 +3848,22 @@ struct DriveMediaGalleryView: View {
             let requestPlayback: @MainActor () async throws -> MediaPlayback = {
                 try await mediaRepository.playback(fileId: entry.id, username: username)
             }
-            previews[entry.id] = DrivePreview(
-                entry: entry,
-                url: URL(string: "https://127.0.0.1/")!,
-                kind: .video,
-                refreshPlayback: requestPlayback
-            )
+            withAnimation(nil) {
+                previews[entry.id] = DrivePreview(
+                    entry: entry,
+                    url: URL(string: "https://127.0.0.1/")!,
+                    kind: .video,
+                    refreshPlayback: requestPlayback
+                )
+            }
         } else if let url = await model.preview(entry) {
-            previews[entry.id] = DrivePreview(
-                entry: entry,
-                url: url,
-                kind: DriveFileOpenRules.isVideo(entry) ? .video : .image
-            )
+            withAnimation(nil) {
+                previews[entry.id] = DrivePreview(
+                    entry: entry,
+                    url: url,
+                    kind: DriveFileOpenRules.isVideo(entry) ? .video : .image
+                )
+            }
         }
     }
 }
@@ -3973,12 +3978,12 @@ private struct DriveImagePreviewPage: View {
             do {
                 let (data, _) = try await URLSession.shared.data(from: url)
                 guard let img = UIImage(data: data) else {
-                    await MainActor.run { loadFailed = true }
+                    await MainActor.run { withAnimation(nil) { loadFailed = true } }
                     return
                 }
-                await MainActor.run { image = img }
+                await MainActor.run { withAnimation(nil) { image = img } }
             } catch {
-                await MainActor.run { loadFailed = true }
+                await MainActor.run { withAnimation(nil) { loadFailed = true } }
             }
         }
     }
@@ -4015,6 +4020,7 @@ private struct DriveVideoPreviewPage: View {
                     .foregroundStyle(.white)
             }
         }
+        .transaction { $0.animation = nil }
         .background(Color.black)
         .task { await controller.start(autoplay: true) }
         .onDisappear { controller.invalidate() }

@@ -1163,30 +1163,6 @@ struct DynamicErrorBanner: View {
     }
 }
 
-// [修改] 底层挂 UISwipeGestureRecognizer(down)：SwiftUI 缩放手势优先消费触摸，图片放大后不会误触发。
-private struct DynamicSwipeDownToDismiss: UIViewControllerRepresentable {
-    let onDismiss: () -> Void
-
-    func makeUIViewController(context: Context) -> UIViewController {
-        let vc = UIViewController()
-        let swipe = UISwipeGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swipedDown))
-        swipe.direction = .down
-        swipe.cancelsTouchesInView = false
-        vc.view.addGestureRecognizer(swipe)
-        return vc
-    }
-
-    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
-
-    func makeCoordinator() -> Coordinator { Coordinator(onDismiss: onDismiss) }
-
-    final class Coordinator: NSObject {
-        let onDismiss: () -> Void
-        init(onDismiss: @escaping () -> Void) { self.onDismiss = onDismiss }
-        @objc func swipedDown() { onDismiss() }
-    }
-}
-
 // [修改] 动态媒体浏览状态保留同一动态的完整媒体顺序，并从点击项开始分页浏览。
 struct DynamicMediaGalleryState: Identifiable, Equatable {
     let media: [DynamicMedia]
@@ -1245,9 +1221,17 @@ struct DynamicMediaGalleryView: View {
             .navigationTitle("\(min(selectedIndex + 1, state.media.count))/\(state.media.count)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+                    .accessibilityLabel("关闭预览")
+                }
+            }
         }
-        // [修改] 全屏媒体浏览支持下滑关闭：图片未缩放时/视频页下滑退出到动态。
-        .background(DynamicSwipeDownToDismiss { dismiss() })
     }
 
     @ViewBuilder
@@ -1305,6 +1289,7 @@ struct DynamicMediaGalleryView: View {
 @MainActor
 private struct DynamicImagePreviewView: View {
     let preview: ChatAttachmentPreview
+    @Environment(\.dismiss) private var dismiss
     @State private var image: UIImage?
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
@@ -1351,6 +1336,14 @@ private struct DynamicImagePreviewView: View {
                             }
                         }
                     }
+                    // [修改] 未缩放时下滑退出预览；缩放后此手势因图片拖动手势激活而不会误触发。
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 24)
+                            .onEnded { value in
+                                guard scale <= 1.01 else { return }
+                                if value.translation.height > 110 { dismiss() }
+                            }
+                    )
             } else {
                 ProgressView("加载图片")
                     .tint(.white)
@@ -1407,6 +1400,7 @@ struct DynamicMediaPreviewSheet: View {
 @MainActor
 private struct DynamicVideoPreviewView: View {
     let preview: ChatAttachmentPreview
+    @Environment(\.dismiss) private var dismiss
     @State private var controller: DriveVideoPlaybackController
 
     init(preview: ChatAttachmentPreview) {
@@ -1432,6 +1426,16 @@ private struct DynamicVideoPreviewView: View {
         .background(Color.black)
         .task { await controller.start(autoplay: true) }
         .onDisappear { controller.invalidate() }
+        // [修改] 视频页垂直下滑退出；横向拖进度条不会误触发。
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 24)
+                .onEnded { value in
+                    if value.translation.height > 110,
+                       abs(value.translation.width) < abs(value.translation.height) {
+                        dismiss()
+                    }
+                }
+        )
     }
 
     private func videoContent(player: AVPlayer) -> some View {

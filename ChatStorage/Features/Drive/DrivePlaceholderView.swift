@@ -3791,8 +3791,9 @@ struct DriveMediaGalleryView: View {
         }
     }
 
-    // [修改] 与动态页实现保持一致：占位→内容直接替换，不加任何 transition/animation，
-    // 避免内容变化干扰 TabView 切换动画产生回弹。
+    // [修改] 占位→内容替换禁用隐式动画：TabView 切换动画进行中若目标页内容
+    // 刚好加载完成，SwiftUI 会把 ProgressView→Image/Video 的替换动画化，产生
+    // 回弹/跳动中间帧。transaction 置 nil 让替换瞬间完成，不干扰翻页动画。
     private func currentPage(for entry: DriveFileEntry, index: Int) -> some View {
         Group {
             if let preview = previews[entry.id] {
@@ -3801,6 +3802,7 @@ struct DriveMediaGalleryView: View {
                 loadingPlaceholder
             }
         }
+        .transaction { $0.animation = nil }
         .task(id: "current-\(index)") {
             await loadPreview(for: entry)
         }
@@ -3814,6 +3816,7 @@ struct DriveMediaGalleryView: View {
                 loadingPlaceholder
             }
         }
+        .transaction { $0.animation = nil }
         .task(id: "adjacent-\(index)") {
             await loadPreview(for: entry)
         }

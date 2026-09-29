@@ -240,23 +240,56 @@ struct MainShellView: View {
     }
 
     // [修改] Tab 容器与生命周期监听分别类型推断，避免真机构建时单个 body 超过编译器时限。
+    // [修改] 自定义底部 tab bar：SwiftUI TabView 在 iPad 竖屏会把切换栏放到顶部够不着，自己画一个在 iPhone/iPad 都贴底。
     private var shellTabs: some View {
-        TabView(selection: $selectedTab) {
-            Tab("消息", systemImage: "bubble.left.and.bubble.right.fill", value: MainShellTab.messages) {
-                messagesPage
-            }
-            .badge(totalUnreadCount)
-            // [修改] 动态固定放在消息和网盘之间，复用同一控制 Socket 和附件上传链路。
-            Tab("动态", systemImage: "quote.bubble.fill", value: MainShellTab.dynamics) {
-                dynamicsPage
-            }
-            Tab("网盘", systemImage: "externaldrive.fill", value: MainShellTab.drive) {
-                drivePage
-            }
-            Tab("我的", systemImage: "person.crop.circle.fill", value: MainShellTab.profile) {
-                profilePage
+        ZStack {
+            switch selectedTab {
+            case .messages: messagesPage
+            case .dynamics: dynamicsPage
+            case .drive: drivePage
+            case .profile: profilePage
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .safeAreaInset(edge: .bottom) { customTabBar }
+    }
+
+    private var customTabBar: some View {
+        HStack(spacing: 0) {
+            tabButton(.messages, title: "消息", icon: "bubble.left.and.bubble.right.fill", badge: totalUnreadCount)
+            tabButton(.dynamics, title: "动态", icon: "quote.bubble.fill")
+            tabButton(.drive, title: "网盘", icon: "externaldrive.fill")
+            tabButton(.profile, title: "我的", icon: "person.crop.circle.fill")
+        }
+        .padding(.top, 6)
+        .padding(.bottom, 2)
+        .background(.ultraThinMaterial)
+    }
+
+    private func tabButton(_ tab: MainShellTab, title: String, icon: String, badge: Int = 0) -> some View {
+        Button {
+            withAnimation(.snappy(duration: 0.15)) { selectedTab = tab }
+        } label: {
+            VStack(spacing: 2) {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: icon)
+                        .font(.system(size: 22))
+                    if badge > 0 {
+                        Text(badge > 99 ? "99+" : "\(badge)")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(.red, in: Capsule())
+                            .offset(x: 12, y: -8)
+                    }
+                }
+                Text(title).font(.system(size: 10))
+            }
+            .frame(maxWidth: .infinity)
+            .foregroundStyle(selectedTab == tab ? AppTheme.primaryGreen : Color.secondary)
+        }
+        .buttonStyle(.plain)
     }
 
     // [修改] 拆开大段 TabView 泛型表达式，避免 Swift 编译器在真机构建时类型推断超时。

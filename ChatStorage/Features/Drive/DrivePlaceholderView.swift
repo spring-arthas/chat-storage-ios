@@ -1043,6 +1043,7 @@ struct DrivePlaceholderView: View {
     @State private var detailEntry: DriveFileEntry?
     @State private var preview: DrivePreview?
     @State private var fullscreenVideo: DrivePreview?
+    @State private var mediaGallery: DriveMediaGalleryState?
     @State private var sharePayload: DriveSharePayload?
     @State private var showsBatchDeleteConfirmation = false
     @State private var thumbnails: [String: UIImage] = [:]
@@ -1312,6 +1313,9 @@ struct DrivePlaceholderView: View {
             .sheet(item: $preview) { DrivePreviewView(preview: $0) }
             // 视频从文件列表直接进入沉浸式播放，不再先弹出普通预览页。
             .fullScreenCover(item: $fullscreenVideo) { DrivePreviewView(preview: $0, startsFullscreen: true) }
+            .fullScreenCover(item: $mediaGallery) { state in
+                DriveMediaGalleryView(state: state, model: model, mediaRepository: mediaRepository, username: username)
+            }
             .sheet(item: $sharePayload) { payload in
                 DriveShareSheet(items: payload.urls, access: payload.access)
             }
@@ -1860,29 +1864,12 @@ struct DrivePlaceholderView: View {
     }
 
     private func showPreview(for entry: DriveFileEntry) async {
-        if isVideo(entry), let mediaRepository {
-            let requestPlayback: @MainActor () async throws -> MediaPlayback = {
-                try await mediaRepository.playback(fileId: entry.id, username: username)
-            }
-            // [修改] 先展示播放器，再由播放器异步申请 Range 播放地址；大视频不再等待请求完成或回退整文件下载。
-            fullscreenVideo = DrivePreview(
-                entry: entry,
-                url: Self.pendingVideoURL,
-                kind: .video,
-                refreshPlayback: requestPlayback,
-                localShareProvider: {
-                    await makeSharePayload(for: entry)
-                }
-            )
-            return
+        // [修改] 网盘图片/视频统一进入全屏分页浏览，支持左右滑动切换和下滑退出，与动态体验一致。
+        let mediaEntries = model.visibleEntries.filter {
+            $0.isFile && (isImage($0) || isVideo($0))
         }
-        guard let url = await model.preview(entry) else { return }
-        let nextPreview = DrivePreview(entry: entry, url: url, kind: isVideo(entry) ? .video : .image)
-        if nextPreview.kind == .video {
-            fullscreenVideo = nextPreview
-        } else {
-            preview = nextPreview
-        }
+        guard let selectedIndex = mediaEntries.firstIndex(where: { $0.id == entry.id }) else { return }
+        mediaGallery = DriveMediaGalleryState(entries: mediaEntries, selectedIndex: selectedIndex)
     }
 
     private static let pendingVideoURL = URL(string: "https://127.0.0.1/pending-video")!
@@ -3726,5 +3713,224 @@ private struct DriveAddSourcePicker: View {
         }
         .presentationDetents([.height(280)])
         .presentationDragIndicator(.visible)
+    }
+}
+
+// MARK: - 网盘媒体全屏浏览（与动态一致：左右滑动切换、下滑退出、图片缩放）
+
+struct DriveMediaGalleryState: Identifiable {
+    let entries: [DriveFileEntry]
+    let selectedIndex: Int
+    var id: String { "\(selectedIndex)-" + entries.map { String($0.id) }.joined(separator: ",") }
+}
+
+@MainActor
+struct DriveMediaGalleryView: View {
+    let state: DriveMediaGalleryState
+    let model: DriveViewModel
+    let mediaRepository: (any MediaPlaybackProviding)?
+    let username: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedIndex: Int
+    @State private var previews: [Int64: DrivePreview] = [:]
+
+    init(state: DriveMediaGalleryState, model: DriveViewModel, mediaRepository: (any MediaPlaybackProviding)?, username: String) {
+        self.state = state
+        self.model = model
+        self.mediaRepository = mediaRepository
+        self.username = username
+        _selectedIndex = State(initialValue: state.selectedIndex)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if state.entries.isEmpty {
+                    ContentUnavailableView("没有可预览的媒体", systemImage: "photo.on.rectangle.angled")
+                } else {
+                    TabView(selection: $selectedIndex) {
+                        ForEach(Array(state.entries.enumerated()), id: \.element.id) { index, entry in
+                            page(for: entry)
+                                .tag(index)
+                                .task(id: "\(entry.id)-\(selectedIndex)") {
+                                    guard abs(index - selectedIndex) <= 1 else { return }
+                                    await loadPreview(for: entry)
+                                }
+                        }
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .automatic))
+                }
+            }
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle("\(min(selectedIndex + 1, state.entries.count))/\(state.entries.count)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+                    .accessibilityLabel("关闭预览")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func page(for entry: DriveFileEntry) -> some View {
+        if let preview = previews[entry.id] {
+            switch preview.kind {
+            case .image:
+                DriveImagePreviewPage(url: preview.url)
+            case .video:
+                DriveVideoPreviewPage(preview: preview)
+            default:
+                ProgressView("不支持的格式").tint(.white)
+            }
+        } else {
+            ProgressView("加载媒体")
+                .tint(.white)
+                .foregroundStyle(.white)
+        }
+    }
+
+    private func loadPreview(for entry: DriveFileEntry) async {
+        guard previews[entry.id] == nil else { return }
+        if DriveFileOpenRules.isVideo(entry), let mediaRepository {
+            let requestPlayback: @MainActor () async throws -> MediaPlayback = {
+                try await mediaRepository.playback(fileId: entry.id, username: username)
+            }
+            previews[entry.id] = DrivePreview(
+                entry: entry,
+                url: URL(string: "https://127.0.0.1/")!,
+                kind: .video,
+                refreshPlayback: requestPlayback
+            )
+        } else if let url = await model.preview(entry) {
+            previews[entry.id] = DrivePreview(
+                entry: entry,
+                url: url,
+                kind: DriveFileOpenRules.isVideo(entry) ? .video : .image
+            )
+        }
+    }
+}
+
+private struct DriveImagePreviewPage: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var image: UIImage?
+    @State private var scale: CGFloat = 1
+    @State private var lastScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .scaleEffect(scale)
+                    .offset(offset)
+                    .gesture(
+                        MagnifyGesture()
+                            .onChanged { value in scale = min(max(lastScale * value.magnification, 1), 5) }
+                            .onEnded { _ in
+                                lastScale = scale
+                                if scale <= 1.01 { resetTransform() }
+                            }
+                    )
+                    .simultaneousGesture(
+                        DragGesture()
+                            .onChanged { value in
+                                offset = CGSize(
+                                    width: lastOffset.width + value.translation.width,
+                                    height: lastOffset.height + value.translation.height
+                                )
+                            }
+                            .onEnded { _ in lastOffset = offset },
+                        isEnabled: scale > 1.01
+                    )
+                    .onTapGesture(count: 2) {
+                        withAnimation(.snappy(duration: 0.22)) {
+                            if scale > 1.01 {
+                                resetTransform()
+                            } else {
+                                scale = 2.5
+                                lastScale = 2.5
+                            }
+                        }
+                    }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 24)
+                            .onEnded { value in
+                                guard scale <= 1.01 else { return }
+                                if value.translation.height > 110 { dismiss() }
+                            }
+                    )
+            } else {
+                ProgressView("加载图片")
+                    .tint(.white)
+                    .foregroundStyle(.white)
+            }
+        }
+        .background(Color.black)
+        .task {
+            guard image == nil else { return }
+            if let (data, _) = try? await URLSession.shared.data(from: url),
+               let img = UIImage(data: data) {
+                await MainActor.run { image = img }
+            }
+        }
+    }
+
+    private func resetTransform() {
+        scale = 1
+        lastScale = 1
+        offset = .zero
+        lastOffset = .zero
+    }
+}
+
+private struct DriveVideoPreviewPage: View {
+    let preview: DrivePreview
+    @Environment(\.dismiss) private var dismiss
+    @State private var controller: DriveVideoPlaybackController
+
+    init(preview: DrivePreview) {
+        self.preview = preview
+        if let refreshPlayback = preview.refreshPlayback {
+            _controller = State(initialValue: DriveVideoPlaybackController(refreshPlayback: refreshPlayback))
+        } else {
+            _controller = State(initialValue: DriveVideoPlaybackController(url: preview.url))
+        }
+    }
+
+    var body: some View {
+        Group {
+            if let player = controller.player {
+                VideoPlayer(player: player)
+            } else {
+                ProgressView("加载视频")
+                    .tint(.white)
+                    .foregroundStyle(.white)
+            }
+        }
+        .background(Color.black)
+        .task { await controller.start(autoplay: true) }
+        .onDisappear { controller.invalidate() }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 24)
+                .onEnded { value in
+                    if value.translation.height > 110,
+                       abs(value.translation.width) < abs(value.translation.height) {
+                        dismiss()
+                    }
+                }
+        )
     }
 }

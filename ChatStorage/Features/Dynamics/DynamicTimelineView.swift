@@ -51,6 +51,13 @@ struct DynamicTimelineView: View {
                     .padding(.vertical, 8)
                 }
                 timelineContent
+                // [修改] iPad 屏幕高，顶部 tab 够不着，把“关注/我的”切换栏移到底部；iPhone 保持原位。
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    DynamicHomeScopeSelector(selectedScope: selectedScope) { scope in
+                        withAnimation(.snappy(duration: 0.2)) { selectedScope = scope }
+                    }
+                    .padding(.bottom, 6)
+                }
             }
             .background(Color(.systemBackground))
             .navigationDestination(isPresented: detailIsPresented) {
@@ -262,7 +269,9 @@ private struct DynamicTimelineList: View {
                     }
                 )
 
-                DynamicHomeScopeSelector(selectedScope: selectedScope, onSelect: onSelectScope)
+                if UIDevice.current.userInterfaceIdiom != .pad {
+                    DynamicHomeScopeSelector(selectedScope: selectedScope, onSelect: onSelectScope)
+                }
 
                 DynamicDailyShareCard(action: onCompose)
 

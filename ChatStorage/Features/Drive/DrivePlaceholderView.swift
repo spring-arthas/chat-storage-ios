@@ -3791,17 +3791,16 @@ struct DriveMediaGalleryView: View {
         }
     }
 
+    // [修改] 与动态页实现保持一致：占位→内容直接替换，不加任何 transition/animation，
+    // 避免内容变化干扰 TabView 切换动画产生回弹。
     private func currentPage(for entry: DriveFileEntry, index: Int) -> some View {
         Group {
             if let preview = previews[entry.id] {
                 content(for: preview)
-                    .transition(.opacity)
             } else {
                 loadingPlaceholder
-                    .transition(.opacity)
             }
         }
-        .animation(.easeOut(duration: 0.18), value: previews[entry.id] != nil)
         .task(id: "current-\(index)") {
             await loadPreview(for: entry)
         }
@@ -3811,13 +3810,10 @@ struct DriveMediaGalleryView: View {
         Group {
             if let preview = previews[entry.id] {
                 DriveImagePreviewPage(url: preview.url)
-                    .transition(.opacity)
             } else {
                 loadingPlaceholder
-                    .transition(.opacity)
             }
         }
-        .animation(.easeOut(duration: 0.18), value: previews[entry.id] != nil)
         .task(id: "adjacent-\(index)") {
             await loadPreview(for: entry)
         }

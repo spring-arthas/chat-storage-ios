@@ -6,9 +6,7 @@ import UIKit
 // [修改] 动态主页面同时保留“关注”和“我的”两套分页状态，切换时间线时不会丢失已加载内容。
 @MainActor
 struct DynamicTimelineView: View {
-    @State private var selectedScope: DynamicTimelineScope = .following
     @State private var followingModel: DynamicTimelineViewModel
-    @State private var mineModel: DynamicTimelineViewModel
     @State private var showsComposer = false
     @State private var selectedPost: DynamicPost?
     @State private var deletionCandidate: DynamicPost?
@@ -35,7 +33,6 @@ struct DynamicTimelineView: View {
         self.attachmentPreviewProvider = attachmentPreviewProvider
         self.currentUser = currentUser
         _followingModel = State(initialValue: DynamicTimelineViewModel(repository: repository, scope: .following))
-        _mineModel = State(initialValue: DynamicTimelineViewModel(repository: repository, scope: .mine))
     }
 
     var body: some View {
@@ -51,13 +48,6 @@ struct DynamicTimelineView: View {
                     .padding(.vertical, 8)
                 }
                 timelineContent
-                // [修改] iPad 屏幕高，顶部 tab 够不着，把“关注/我的”切换栏移到底部；iPhone 保持原位。
-                if UIDevice.current.userInterfaceIdiom == .pad {
-                    DynamicHomeScopeSelector(selectedScope: selectedScope) { scope in
-                        withAnimation(.snappy(duration: 0.2)) { selectedScope = scope }
-                    }
-                    .padding(.bottom, 6)
-                }
             }
             .background(Color(.systemBackground))
             .navigationDestination(isPresented: detailIsPresented) {
@@ -72,8 +62,8 @@ struct DynamicTimelineView: View {
             }
             .toolbar(.hidden, for: .navigationBar)
         }
-        .task(id: selectedScope) {
-            await activeModel.loadInitial()
+        .task {
+            await followingModel.loadInitial()
             await presentPersistedComposerIfNeeded()
         }
         // [修改] 聊天或网盘切到动态 Tab 时自动消费一次性草稿并打开同一个发布器。
@@ -106,9 +96,7 @@ struct DynamicTimelineView: View {
         }
     }
 
-    private var activeModel: DynamicTimelineViewModel {
-        selectedScope == .following ? followingModel : mineModel
-    }
+    private var activeModel: DynamicTimelineViewModel { followingModel }
 
     // [修改] 重新进入动态页时自动恢复未完成发布，避免草稿只存在磁盘而用户找不到。
     private func presentPersistedComposerIfNeeded() async {
@@ -188,18 +176,13 @@ struct DynamicTimelineView: View {
         DynamicTimelineList(
             model: activeModel,
             currentUser: currentUser,
-            selectedScope: selectedScope,
             attachmentPreviewProvider: attachmentPreviewProvider,
             previewingMediaID: previewingMediaID,
-            onSelectScope: { scope in
-                withAnimation(.snappy(duration: 0.2)) { selectedScope = scope }
-            },
             onCompose: { showsComposer = true },
             onOpenDetail: { selectedPost = $0 },
             onOpenMedia: openMedia,
             onDelete: { deletionCandidate = $0 }
         )
-        .id(selectedScope)
     }
 
     private func openMedia(_ media: DynamicMedia, in collection: [DynamicMedia]) {
@@ -211,18 +194,9 @@ struct DynamicTimelineView: View {
         guard let candidate = deletionCandidate else { return }
         deletionCandidate = nil
         Task {
-            if selectedScope == .following {
-                await followingModel.delete(postID: candidate.id)
-                if followingModel.errorMessage == nil {
-                    await cleanupLocalMediaFiles(for: candidate.media)
-                    await mineModel.refresh()
-                }
-            } else {
-                await mineModel.delete(postID: candidate.id)
-                if mineModel.errorMessage == nil {
-                    await cleanupLocalMediaFiles(for: candidate.media)
-                    await followingModel.refresh()
-                }
+            await followingModel.delete(postID: candidate.id)
+            if followingModel.errorMessage == nil {
+                await cleanupLocalMediaFiles(for: candidate.media)
             }
         }
     }
@@ -234,10 +208,7 @@ struct DynamicTimelineView: View {
     }
 
     private func refreshBothTimelines() {
-        Task {
-            await followingModel.refresh()
-            await mineModel.refresh()
-        }
+        Task { await followingModel.refresh() }
     }
 }
 
@@ -246,10 +217,8 @@ struct DynamicTimelineView: View {
 private struct DynamicTimelineList: View {
     let model: DynamicTimelineViewModel
     let currentUser: AuthenticatedUser
-    let selectedScope: DynamicTimelineScope
     let attachmentPreviewProvider: (any ChatAttachmentPreviewProviding)?
     let previewingMediaID: Int64?
-    let onSelectScope: (DynamicTimelineScope) -> Void
     let onCompose: () -> Void
     let onOpenDetail: (DynamicPost) -> Void
     let onOpenMedia: (DynamicMedia, [DynamicMedia]) -> Void
@@ -261,17 +230,12 @@ private struct DynamicTimelineList: View {
             VStack(spacing: 0) {
                 DynamicStoryRail(
                     items: DynamicTimelineStoryBuilder.make(currentUser: currentUser, posts: model.posts),
-                    onSelectMine: { onSelectScope(.mine) },
                     onOpenPost: { postID in
                         if let post = model.posts.first(where: { $0.id == postID }) {
                             onOpenDetail(post)
                         }
                     }
                 )
-
-                if UIDevice.current.userInterfaceIdiom != .pad {
-                    DynamicHomeScopeSelector(selectedScope: selectedScope, onSelect: onSelectScope)
-                }
 
                 DynamicDailyShareCard(action: onCompose)
 
@@ -352,7 +316,6 @@ enum DynamicTimelineStoryBuilder {
 @MainActor
 private struct DynamicStoryRail: View {
     let items: [DynamicTimelineStory]
-    let onSelectMine: () -> Void
     let onOpenPost: (Int64) -> Void
 
     var body: some View {
@@ -360,9 +323,7 @@ private struct DynamicStoryRail: View {
             HStack(alignment: .top, spacing: 14) {
                 ForEach(items) { item in
                     Button {
-                        if item.isCurrentUser {
-                            onSelectMine()
-                        } else if let latestPostID = item.latestPostID {
+                        if let latestPostID = item.latestPostID {
                             onOpenPost(latestPostID)
                         }
                     } label: {
@@ -392,37 +353,6 @@ private struct DynamicStoryRail: View {
             .padding(.vertical, 10)
         }
         .accessibilityIdentifier("dynamic.story-rail")
-    }
-}
-
-// [修改] 主页分段改成参考图的胶囊样式，但仍保留当前代码已有的“关注/我的”业务含义。
-@MainActor
-private struct DynamicHomeScopeSelector: View {
-    let selectedScope: DynamicTimelineScope
-    let onSelect: (DynamicTimelineScope) -> Void
-
-    var body: some View {
-        HStack(spacing: 4) {
-            button(title: "关注", scope: .following, identifier: "dynamic.scope.following")
-            button(title: "我的", scope: .mine, identifier: "dynamic.scope.mine")
-        }
-        .padding(4)
-        .background(Color(.secondarySystemBackground), in: Capsule())
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-    }
-
-    private func button(title: String, scope: DynamicTimelineScope, identifier: String) -> some View {
-        Button { onSelect(scope) } label: {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(selectedScope == scope ? .white : AppTheme.primaryGreen)
-                .frame(maxWidth: .infinity, minHeight: 38)
-                .background(selectedScope == scope ? AppTheme.primaryGreen : .clear, in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier(identifier)
-        .accessibilityAddTraits(selectedScope == scope ? .isSelected : [])
     }
 }
 

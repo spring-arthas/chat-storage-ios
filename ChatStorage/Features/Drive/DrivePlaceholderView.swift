@@ -3820,8 +3820,7 @@ struct DriveMediaGalleryView: View {
                                 store: store,
                                 model: model,
                                 mediaRepository: mediaRepository,
-                                username: username,
-                                onDismiss: { dismiss() }
+                                username: username
                             )
                         }
                     )
@@ -3857,7 +3856,6 @@ private struct DriveMediaPageContent: View {
     let model: DriveViewModel
     let mediaRepository: (any MediaPlaybackProviding)?
     let username: String
-    let onDismiss: () -> Void
 
     private var isCurrent: Bool { store.currentIndex == index }
     private var isAdjacent: Bool { abs(store.currentIndex - index) == 1 }
@@ -3868,7 +3866,7 @@ private struct DriveMediaPageContent: View {
                 if isCurrent {
                     content(for: preview)
                 } else if isAdjacent && !DriveFileOpenRules.isVideo(entry) {
-                    DriveImagePreviewPage(url: preview.url, onDismiss: onDismiss)
+                    DriveImagePreviewPage(url: preview.url)
                 } else {
                     loadingPlaceholder
                 }
@@ -3892,9 +3890,9 @@ private struct DriveMediaPageContent: View {
     private func content(for preview: DrivePreview) -> some View {
         switch preview.kind {
         case .image:
-            DriveImagePreviewPage(url: preview.url, onDismiss: onDismiss)
+            DriveImagePreviewPage(url: preview.url)
         case .video:
-            DriveVideoPreviewPage(preview: preview, onDismiss: onDismiss)
+            DriveVideoPreviewPage(preview: preview)
         default:
             ProgressView("不支持的格式").tint(.white)
         }
@@ -3962,8 +3960,9 @@ private struct DriveMediaPageContainer: UIViewControllerRepresentable {
 
     func updateUIViewController(_ pvc: UIPageViewController, context: Context) {
         context.coordinator.parent = self
-        // 用户手势导致的索引变化已由 delegate 写入 store，此处只在外部索引变化时
-        // （如重新初始化）同步翻页，正常滑动过程不会重复 setViewControllers。
+        // 手势滑动进行中绝不编程 setViewControllers，否则会在用户手指未抬起时
+        // 强制跳页、打断正在进行的滑动手势，并导致 UIPageViewController 后续滑动失效。
+        guard !context.coordinator.isTransitioning else { return }
         if let current = pvc.viewControllers?.first as? PageHostingController,
            current.index != store.currentIndex {
             let direction: UIPageViewController.NavigationDirection =
@@ -3976,9 +3975,12 @@ private struct DriveMediaPageContainer: UIViewControllerRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
+    final class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate, UIGestureRecognizerDelegate {
         var parent: DriveMediaPageContainer
         private var controllers: [Int: PageHostingController] = [:]
+        /// 手势驱动的分页过渡是否正在进行。进行中禁止 updateUIViewController 编程
+        /// setViewControllers，否则会在用户滑动中途强制跳页、打断手势并导致后续滑动失效。
+        private(set) var isTransitioning = false
 
         init(_ parent: DriveMediaPageContainer) { self.parent = parent }
 
@@ -3991,15 +3993,36 @@ private struct DriveMediaPageContainer: UIViewControllerRepresentable {
             return hc
         }
 
+        // [修改] 关闭边缘弹性 + 让分页 pan 与页面内 SwiftUI 手势（下滑退出、图片缩放）共存。
+        // UIHostingController 外包后，SwiftUI 的 simultaneousGesture 不再自动与外部
+        // UIPageViewController 的 pan 协调，必须显式设 delegate 允许同时识别，
+        // 否则页面内 DragGesture 会吃掉横向滑动导致左右翻页失效。
         func disableBounce(_ pvc: UIPageViewController) {
             DispatchQueue.main.async {
                 for sub in pvc.view.subviews {
                     if let scroll = sub as? UIScrollView {
                         scroll.bounces = false
                         scroll.alwaysBounceHorizontal = false
+                        scroll.panGestureRecognizer.delegate = self
+                        scroll.panGestureRecognizer.cancelsTouchesInView = false
                     }
                 }
             }
+        }
+
+        // 分页 pan 与页面内任何手势都同时识别，横向滑动翻页、纵向滑动退出互不阻塞。
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+
+        func pageViewController(
+            _ pvc: UIPageViewController,
+            willTransitionTo pendingViewControllers: [UIViewController]
+        ) {
+            isTransitioning = true
         }
 
         func pageViewController(
@@ -4025,6 +4048,7 @@ private struct DriveMediaPageContainer: UIViewControllerRepresentable {
             previousViewControllers: [UIViewController],
             transitionCompleted completed: Bool
         ) {
+            isTransitioning = false
             guard completed,
                   let hc = pvc.viewControllers?.first as? PageHostingController
             else { return }
@@ -4041,7 +4065,6 @@ private final class PageHostingController: UIHostingController<DriveMediaPageCon
 
 private struct DriveImagePreviewPage: View {
     let url: URL
-    let onDismiss: () -> Void
     @State private var image: UIImage?
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
@@ -4058,7 +4081,9 @@ private struct DriveImagePreviewPage: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .scaleEffect(scale)
                     .offset(offset)
-                    .gesture(
+                    // [修改] 缩放手势改用 simultaneousGesture，与 UIPageViewController
+                    // 水平滑动共存；单指滑动时缩放手势不识别，分页滑动可正常启动。
+                    .simultaneousGesture(
                         MagnifyGesture()
                             .onChanged { value in scale = min(max(lastScale * value.magnification, 1), 5) }
                             .onEnded { _ in
@@ -4087,13 +4112,6 @@ private struct DriveImagePreviewPage: View {
                             }
                         }
                     }
-                    .simultaneousGesture(
-                        DragGesture(minimumDistance: 24)
-                            .onEnded { value in
-                                guard scale <= 1.01 else { return }
-                                if value.translation.height > 110 { onDismiss() }
-                            }
-                    )
             } else if loadFailed {
                 // [修改] 加载失败给出可重试入口，避免一直停留在加载态。
                 VStack(spacing: 12) {
@@ -4138,12 +4156,10 @@ private struct DriveImagePreviewPage: View {
 
 private struct DriveVideoPreviewPage: View {
     let preview: DrivePreview
-    let onDismiss: () -> Void
     @State private var controller: DriveVideoPlaybackController
 
-    init(preview: DrivePreview, onDismiss: @escaping () -> Void) {
+    init(preview: DrivePreview) {
         self.preview = preview
-        self.onDismiss = onDismiss
         if let refreshPlayback = preview.refreshPlayback {
             _controller = State(initialValue: DriveVideoPlaybackController(refreshPlayback: refreshPlayback))
         } else {
@@ -4165,16 +4181,6 @@ private struct DriveVideoPreviewPage: View {
         .background(Color.black)
         .task { await controller.start(autoplay: true) }
         .onDisappear { controller.invalidate() }
-        // [修改] 视频页垂直下滑退出；横向拖进度条或左右切换不会误触发。
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 24)
-                .onEnded { value in
-                    if value.translation.height > 110,
-                       abs(value.translation.width) < abs(value.translation.height) {
-                        onDismiss()
-                    }
-                }
-        )
     }
 
     // [修改] 网盘全屏浏览使用固定全屏视频容器（相册式）：容器始终铺满屏幕，

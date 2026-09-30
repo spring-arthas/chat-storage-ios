@@ -11,6 +11,26 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+// [优化] 缩略图加载超时辅助：指定时间内未完成则取消任务并抛错，
+// 避免服务端慢时单个请求长时间占用并发槽位。
+struct DriveThumbnailTimeoutError: Error, Sendable {}
+
+func withDriveTimeout<Result: Sendable>(
+    _ duration: Duration,
+    operation: @escaping @Sendable () async throws -> Result
+) async throws -> Result {
+    try await withThrowingTaskGroup(of: Result.self) { group in
+        group.addTask { try await operation() }
+        group.addTask {
+            try await Task.sleep(for: duration)
+            throw DriveThumbnailTimeoutError()
+        }
+        guard let result = try await group.next() else { throw CancellationError() }
+        group.cancelAll()
+        return result
+    }
+}
+
 // [修改] 把系统刷新控件替换为可测试的下拉状态机，松手后只触发一次当前目录刷新。
 struct DrivePullRefreshState {
     let triggerDistance: CGFloat
@@ -3147,7 +3167,13 @@ enum DriveThumbnailKind: Sendable {
 
 // [修改] 缩略图加载统一经过一个三并发入口，SwiftUI 行取消会继续传给预览下载或视频抽帧。
 actor DriveThumbnailLoader {
-    static let maximumRemoteImageBytes: Int64 = 8 * 1024 * 1024
+    // [优化] 列表缩略图仅渲染 360px，3MB 前缀足以解码绝大多数 JPEG/HEIC，
+    // 原 8MB 在大目录下会造成带宽浪费和加载缓慢。
+    static let maximumRemoteImageBytes: Int64 = 3 * 1024 * 1024
+    // [优化] 缩略图加载总超时，避免服务端慢时单个请求长时间占用并发槽位。
+    static let loadTimeout: Duration = .seconds(15)
+    // [优化] 视频缩略图 playback 地址请求超时，超时后快速回退到 range 抽帧。
+    static let videoPlaybackTimeout: Duration = .seconds(8)
     private let transferManager: (any DriveTransferManaging)?
     private let mediaRepository: (any MediaPlaybackProviding)?
     private let username: String
@@ -3171,32 +3197,36 @@ actor DriveThumbnailLoader {
         let transferManager = transferManager
         let mediaRepository = mediaRepository
         let username = username
+        let limiter = limiter
         do {
-            let data: Data? = try await limiter.withPermit {
-                try Task.checkCancellation()
-                switch kind {
-                case .image:
-                    guard let transferManager else { return nil }
-                    let sourceData = try await transferManager.thumbnailData(
-                        remoteFileId: entry.id,
-                        fileName: entry.name,
-                        fileSize: entry.size ?? 0,
-                        maximumBytes: Self.maximumRemoteImageBytes
-                    )
+            // [优化] 缩略图加载总超时 15s，超时直接放弃，避免大目录下慢请求阻塞后续缩略图。
+            let data: Data? = try await withDriveTimeout(Self.loadTimeout) {
+                try await limiter.withPermit {
                     try Task.checkCancellation()
-                    return await DriveThumbnailRenderer.jpegData(
-                        from: sourceData,
-                        isFinal: entry.size.map { Int64(sourceData.count) >= $0 } ?? false,
-                        maxPixelSize: 360
-                    )
-                case .video:
-                    guard mediaRepository != nil || transferManager != nil else { return nil }
-                    return try await Self.videoThumbnailData(
-                        entry: entry,
-                        mediaRepository: mediaRepository,
-                        transferManager: transferManager,
-                        username: username
-                    )
+                    switch kind {
+                    case .image:
+                        guard let transferManager else { return nil }
+                        let sourceData = try await transferManager.thumbnailData(
+                            remoteFileId: entry.id,
+                            fileName: entry.name,
+                            fileSize: entry.size ?? 0,
+                            maximumBytes: Self.maximumRemoteImageBytes
+                        )
+                        try Task.checkCancellation()
+                        return await DriveThumbnailRenderer.jpegData(
+                            from: sourceData,
+                            isFinal: entry.size.map { Int64(sourceData.count) >= $0 } ?? false,
+                            maxPixelSize: 360
+                        )
+                    case .video:
+                        guard mediaRepository != nil || transferManager != nil else { return nil }
+                        return try await Self.videoThumbnailData(
+                            entry: entry,
+                            mediaRepository: mediaRepository,
+                            transferManager: transferManager,
+                            username: username
+                        )
+                    }
                 }
             }
             try Task.checkCancellation()
@@ -3213,12 +3243,18 @@ actor DriveThumbnailLoader {
         transferManager: (any DriveTransferManaging)?,
         username: String
     ) async throws -> Data? {
-        if let mediaRepository,
-           let playback = try? await mediaRepository.playback(fileId: entry.id, username: username),
-           let pinnedMediaAsset = PinnedMediaAsset(url: playback.playURL),
-           let data = try? await generateVideoThumbnail(asset: pinnedMediaAsset.asset) {
-            withExtendedLifetime(pinnedMediaAsset) {}
-            return data
+        // [优化] playback 地址请求加 8s 超时，超时后立即回退到 range 抽帧，
+        // 避免媒体网关慢时单个视频缩略图长时间占用并发槽位。
+        if let mediaRepository {
+            let playback: MediaPlayback? = try? await withDriveTimeout(Self.videoPlaybackTimeout) {
+                try await mediaRepository.playback(fileId: entry.id, username: username)
+            }
+            if let playback,
+               let pinnedMediaAsset = PinnedMediaAsset(url: playback.playURL),
+               let data = try? await generateVideoThumbnail(asset: pinnedMediaAsset.asset) {
+                withExtendedLifetime(pinnedMediaAsset) {}
+                return data
+            }
         }
 
         guard let transferManager,

@@ -3730,8 +3730,55 @@ final class DriveMediaPreviewStore {
     var previews: [Int64: DrivePreview] = [:]
     var currentIndex: Int
 
+    // [新增] 全局加载门控：同一时刻只允许一个加载任务在途（当前页优先）。
+    // 大目录快速滑动时，旧页任务被取消、新页立即抢占，杜绝多个视频/大文件
+    // 并发下载抢占带宽导致后续分页预览加载不出的问题。
+    @ObservationIgnored private var loadTask: Task<Void, Never>?
+    // 加载代际：抢占发生时递增，旧任务的收尾（defer）不会误清新一代的状态。
+    @ObservationIgnored private var loadGeneration: UInt64 = 0
+
     init(currentIndex: Int) {
         self.currentIndex = currentIndex
+    }
+
+    /// 当前页加载：抢占式，先取消一切在途任务（含低优先级预加载）再启动。
+    func requestCurrentLoad(
+        entry: DriveFileEntry,
+        load: @escaping @MainActor (DriveFileEntry) async -> Void
+    ) {
+        loadTask?.cancel()
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        loadTask = Task { @MainActor in
+            defer {
+                if self.loadGeneration == generation { self.loadTask = nil }
+            }
+            await load(entry)
+        }
+    }
+
+    /// 相邻图片页预加载（低优先级）：仅在没有在途加载时执行；
+    /// 当前页发起加载时会立即被取消，不抢占带宽。
+    func requestAdjacentPreload(
+        entry: DriveFileEntry,
+        load: @escaping @MainActor (DriveFileEntry) async -> Void
+    ) {
+        guard loadTask == nil else { return }
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        loadTask = Task { @MainActor in
+            defer {
+                if self.loadGeneration == generation { self.loadTask = nil }
+            }
+            await load(entry)
+        }
+    }
+
+    /// 关闭全屏预览时清理在途加载任务。
+    func cancelPendingLoads() {
+        loadTask?.cancel()
+        loadTask = nil
+        loadGeneration &+= 1
     }
 }
 
@@ -3782,6 +3829,7 @@ struct DriveMediaGalleryView: View {
             }
             .transaction { $0.animation = nil }
             .background(Color.black.ignoresSafeArea())
+            .onDisappear { store.cancelPendingLoads() }
             .navigationTitle("\(min(store.currentIndex + 1, state.entries.count))/\(state.entries.count)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for: .navigationBar)
@@ -3830,11 +3878,12 @@ private struct DriveMediaPageContent: View {
         }
         .transaction { $0.animation = nil }
         .task(id: "page-\(index)-\(isCurrent)") {
-            // 分页加载调度：当前页立即加载；相邻图片页轻量预加载；其余页面不启动网络任务。
+            // 分页加载调度（走全局串行门控）：当前页立即加载并抢占在途任务；
+            // 相邻图片页仅在无在途加载时轻量预加载；其余页面不启动网络任务。
             if isCurrent {
-                await loadPreview(for: entry)
+                store.requestCurrentLoad(entry: entry) { await self.loadPreview(for: $0) }
             } else if isAdjacent && !DriveFileOpenRules.isVideo(entry) {
-                await loadPreview(for: entry)
+                store.requestAdjacentPreload(entry: entry) { await self.loadPreview(for: $0) }
             }
         }
     }

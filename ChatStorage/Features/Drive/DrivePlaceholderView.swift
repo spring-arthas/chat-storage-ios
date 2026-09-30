@@ -3725,21 +3725,31 @@ struct DriveMediaGalleryState: Identifiable {
 }
 
 @MainActor
+@Observable
+final class DriveMediaPreviewStore {
+    var previews: [Int64: DrivePreview] = [:]
+    var currentIndex: Int
+
+    init(currentIndex: Int) {
+        self.currentIndex = currentIndex
+    }
+}
+
+@MainActor
 struct DriveMediaGalleryView: View {
     let state: DriveMediaGalleryState
     let model: DriveViewModel
     let mediaRepository: (any MediaPlaybackProviding)?
     let username: String
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedIndex: Int
-    @State private var previews: [Int64: DrivePreview] = [:]
+    @State private var store: DriveMediaPreviewStore
 
     init(state: DriveMediaGalleryState, model: DriveViewModel, mediaRepository: (any MediaPlaybackProviding)?, username: String) {
         self.state = state
         self.model = model
         self.mediaRepository = mediaRepository
         self.username = username
-        _selectedIndex = State(initialValue: state.selectedIndex)
+        _store = State(initialValue: DriveMediaPreviewStore(currentIndex: state.selectedIndex))
     }
 
     var body: some View {
@@ -3748,19 +3758,31 @@ struct DriveMediaGalleryView: View {
                 if state.entries.isEmpty {
                     ContentUnavailableView("没有可预览的媒体", systemImage: "photo.on.rectangle.angled")
                 } else {
-                    TabView(selection: $selectedIndex) {
-                        ForEach(Array(state.entries.enumerated()), id: \.element.id) { index, entry in
-                            page(for: entry, index: index)
-                                .tag(index)
+                    // [修改] UIKit UIPageViewController 分页（iPhone 相册同款底层）：
+                    // 页面切换是 UIScrollView 分页减速动画，无弹性回弹；页面 rootView
+                    // 创建后不重建（store 为 @Observable，数据变化由 SwiftUI 自行刷新），
+                    // 避免上次实现中 rootView 重建打断滑动手势的问题。
+                    DriveMediaPageContainer(
+                        entries: state.entries,
+                        store: store,
+                        onIndexChange: { store.currentIndex = $0 },
+                        makePage: { index in
+                            DriveMediaPageContent(
+                                entry: state.entries[index],
+                                index: index,
+                                store: store,
+                                model: model,
+                                mediaRepository: mediaRepository,
+                                username: username,
+                                onDismiss: { dismiss() }
+                            )
                         }
-                    }
-                    .tabViewStyle(.page(indexDisplayMode: .automatic))
+                    )
                 }
             }
             .transaction { $0.animation = nil }
             .background(Color.black.ignoresSafeArea())
-            .background(PageBounceDisabler())
-            .navigationTitle("\(min(selectedIndex + 1, state.entries.count))/\(state.entries.count)")
+            .navigationTitle("\(min(store.currentIndex + 1, state.entries.count))/\(state.entries.count)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
@@ -3775,51 +3797,45 @@ struct DriveMediaGalleryView: View {
             }
         }
     }
+}
 
-    // [修改] 分页加载调度：快速滑动时同一时间只允许当前页真实加载。
-    // 视频只当前页加载（避免多路视频流并发抢占带宽/服务端并发导致后续页失败）；
-    // 相邻页仅预下载图片（轻量）；其余页面纯占位，不启动任何网络任务。
-    @ViewBuilder
-    private func page(for entry: DriveFileEntry, index: Int) -> some View {
-        let isCurrent = index == selectedIndex
-        let isAdjacent = abs(index - selectedIndex) == 1
-        if isCurrent {
-            currentPage(for: entry, index: index)
-        } else if isAdjacent && !DriveFileOpenRules.isVideo(entry) {
-            adjacentImagePage(for: entry, index: index)
-        } else {
-            loadingPlaceholder
-        }
-    }
+// [修改] 自包含页面内容：加载调度内聚在页面内部，通过 @Observable store 响应式更新，
+// 不依赖宿主容器重建视图。
+@MainActor
+private struct DriveMediaPageContent: View {
+    let entry: DriveFileEntry
+    let index: Int
+    let store: DriveMediaPreviewStore
+    let model: DriveViewModel
+    let mediaRepository: (any MediaPlaybackProviding)?
+    let username: String
+    let onDismiss: () -> Void
 
-    // [修改] 占位→内容替换禁用隐式动画：TabView 切换动画进行中若目标页内容
-    // 刚好加载完成，SwiftUI 会把 ProgressView→Image/Video 的替换动画化，产生
-    // 回弹/跳动中间帧。transaction 置 nil 让替换瞬间完成，不干扰翻页动画。
-    private func currentPage(for entry: DriveFileEntry, index: Int) -> some View {
+    private var isCurrent: Bool { store.currentIndex == index }
+    private var isAdjacent: Bool { abs(store.currentIndex - index) == 1 }
+
+    var body: some View {
         Group {
-            if let preview = previews[entry.id] {
-                content(for: preview)
+            if let preview = store.previews[entry.id] {
+                if isCurrent {
+                    content(for: preview)
+                } else if isAdjacent && !DriveFileOpenRules.isVideo(entry) {
+                    DriveImagePreviewPage(url: preview.url, onDismiss: onDismiss)
+                } else {
+                    loadingPlaceholder
+                }
             } else {
                 loadingPlaceholder
             }
         }
         .transaction { $0.animation = nil }
-        .task(id: "current-\(index)") {
-            await loadPreview(for: entry)
-        }
-    }
-
-    private func adjacentImagePage(for entry: DriveFileEntry, index: Int) -> some View {
-        Group {
-            if let preview = previews[entry.id] {
-                DriveImagePreviewPage(url: preview.url)
-            } else {
-                loadingPlaceholder
+        .task(id: "page-\(index)-\(isCurrent)") {
+            // 分页加载调度：当前页立即加载；相邻图片页轻量预加载；其余页面不启动网络任务。
+            if isCurrent {
+                await loadPreview(for: entry)
+            } else if isAdjacent && !DriveFileOpenRules.isVideo(entry) {
+                await loadPreview(for: entry)
             }
-        }
-        .transaction { $0.animation = nil }
-        .task(id: "adjacent-\(index)") {
-            await loadPreview(for: entry)
         }
     }
 
@@ -3827,9 +3843,9 @@ struct DriveMediaGalleryView: View {
     private func content(for preview: DrivePreview) -> some View {
         switch preview.kind {
         case .image:
-            DriveImagePreviewPage(url: preview.url)
+            DriveImagePreviewPage(url: preview.url, onDismiss: onDismiss)
         case .video:
-            DriveVideoPreviewPage(preview: preview)
+            DriveVideoPreviewPage(preview: preview, onDismiss: onDismiss)
         default:
             ProgressView("不支持的格式").tint(.white)
         }
@@ -3841,15 +3857,14 @@ struct DriveMediaGalleryView: View {
             .foregroundStyle(.white)
     }
 
-    // [修改] 当前页与相邻页共用同一加载入口；previews 缓存保证滑回已加载页不重复下载。
     private func loadPreview(for entry: DriveFileEntry) async {
-        guard previews[entry.id] == nil else { return }
+        guard store.previews[entry.id] == nil else { return }
         if DriveFileOpenRules.isVideo(entry), let mediaRepository {
             let requestPlayback: @MainActor () async throws -> MediaPlayback = {
                 try await mediaRepository.playback(fileId: entry.id, username: username)
             }
             withAnimation(nil) {
-                previews[entry.id] = DrivePreview(
+                store.previews[entry.id] = DrivePreview(
                     entry: entry,
                     url: URL(string: "https://127.0.0.1/")!,
                     kind: .video,
@@ -3858,7 +3873,7 @@ struct DriveMediaGalleryView: View {
             }
         } else if let url = await model.preview(entry) {
             withAnimation(nil) {
-                previews[entry.id] = DrivePreview(
+                store.previews[entry.id] = DrivePreview(
                     entry: entry,
                     url: url,
                     kind: DriveFileOpenRules.isVideo(entry) ? .video : .image
@@ -3868,40 +3883,116 @@ struct DriveMediaGalleryView: View {
     }
 }
 
-// [修改] 关闭 TabView(.page) 底层 UIPageViewController 分页 scrollView 的 bounce，
-// 消除滑动切换时的边缘弹性回弹，与 iPhone 相册行为一致。
-private struct PageBounceDisabler: UIViewRepresentable {
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
-        DispatchQueue.main.async { disablePagingBounce() }
-        return view
+// [修改] UIKit UIPageViewController 容器：滑动切换为 UIScrollView 分页减速动画。
+// 页面 controller 创建后缓存复用，绝不重建 rootView，滑动手势不被内容更新打断。
+@MainActor
+private struct DriveMediaPageContainer: UIViewControllerRepresentable {
+    let entries: [DriveFileEntry]
+    let store: DriveMediaPreviewStore
+    let onIndexChange: (Int) -> Void
+    let makePage: (Int) -> DriveMediaPageContent
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIViewController(context: Context) -> UIPageViewController {
+        let pvc = UIPageViewController(
+            transitionStyle: .scroll,
+            navigationOrientation: .horizontal,
+            options: [.interPageSpacing: 0]
+        )
+        pvc.dataSource = context.coordinator
+        pvc.delegate = context.coordinator
+        pvc.setViewControllers(
+            [context.coordinator.controller(for: store.currentIndex)],
+            direction: .forward,
+            animated: false
+        )
+        context.coordinator.disableBounce(pvc)
+        return pvc
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
-        DispatchQueue.main.async { disablePagingBounce() }
-    }
-
-    private func disablePagingBounce() {
-        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let window = scene.windows.first else { return }
-        disableBounce(in: window)
-    }
-
-    private func disableBounce(in view: UIView) {
-        if let scroll = view as? UIScrollView, scroll.isPagingEnabled {
-            scroll.bounces = false
-            scroll.alwaysBounceHorizontal = false
-            return
+    func updateUIViewController(_ pvc: UIPageViewController, context: Context) {
+        context.coordinator.parent = self
+        // 用户手势导致的索引变化已由 delegate 写入 store，此处只在外部索引变化时
+        // （如重新初始化）同步翻页，正常滑动过程不会重复 setViewControllers。
+        if let current = pvc.viewControllers?.first as? PageHostingController,
+           current.index != store.currentIndex {
+            let direction: UIPageViewController.NavigationDirection =
+                current.index < store.currentIndex ? .forward : .reverse
+            pvc.setViewControllers(
+                [context.coordinator.controller(for: store.currentIndex)],
+                direction: direction,
+                animated: true
+            )
         }
-        for subview in view.subviews {
-            disableBounce(in: subview)
+    }
+
+    final class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
+        var parent: DriveMediaPageContainer
+        private var controllers: [Int: PageHostingController] = [:]
+
+        init(_ parent: DriveMediaPageContainer) { self.parent = parent }
+
+        func controller(for index: Int) -> PageHostingController {
+            if let cached = controllers[index] { return cached }
+            let hc = PageHostingController(rootView: parent.makePage(index))
+            hc.index = index
+            hc.view.backgroundColor = .black
+            controllers[index] = hc
+            return hc
+        }
+
+        func disableBounce(_ pvc: UIPageViewController) {
+            DispatchQueue.main.async {
+                for sub in pvc.view.subviews {
+                    if let scroll = sub as? UIScrollView {
+                        scroll.bounces = false
+                        scroll.alwaysBounceHorizontal = false
+                    }
+                }
+            }
+        }
+
+        func pageViewController(
+            _ pvc: UIPageViewController,
+            viewControllerBefore vc: UIViewController
+        ) -> UIViewController? {
+            guard let hc = vc as? PageHostingController, hc.index > 0 else { return nil }
+            return controller(for: hc.index - 1)
+        }
+
+        func pageViewController(
+            _ pvc: UIPageViewController,
+            viewControllerAfter vc: UIViewController
+        ) -> UIViewController? {
+            guard let hc = vc as? PageHostingController,
+                  hc.index < parent.entries.count - 1 else { return nil }
+            return controller(for: hc.index + 1)
+        }
+
+        func pageViewController(
+            _ pvc: UIPageViewController,
+            didFinishAnimating finished: Bool,
+            previousViewControllers: [UIViewController],
+            transitionCompleted completed: Bool
+        ) {
+            guard completed,
+                  let hc = pvc.viewControllers?.first as? PageHostingController
+            else { return }
+            if parent.store.currentIndex != hc.index {
+                parent.onIndexChange(hc.index)
+            }
         }
     }
 }
 
+private final class PageHostingController: UIHostingController<DriveMediaPageContent> {
+    var index = 0
+}
+
 private struct DriveImagePreviewPage: View {
     let url: URL
-    @Environment(\.dismiss) private var dismiss
+    let onDismiss: () -> Void
     @State private var image: UIImage?
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
@@ -3951,7 +4042,7 @@ private struct DriveImagePreviewPage: View {
                         DragGesture(minimumDistance: 24)
                             .onEnded { value in
                                 guard scale <= 1.01 else { return }
-                                if value.translation.height > 110 { dismiss() }
+                                if value.translation.height > 110 { onDismiss() }
                             }
                     )
             } else if loadFailed {
@@ -3998,11 +4089,12 @@ private struct DriveImagePreviewPage: View {
 
 private struct DriveVideoPreviewPage: View {
     let preview: DrivePreview
-    @Environment(\.dismiss) private var dismiss
+    let onDismiss: () -> Void
     @State private var controller: DriveVideoPlaybackController
 
-    init(preview: DrivePreview) {
+    init(preview: DrivePreview, onDismiss: @escaping () -> Void) {
         self.preview = preview
+        self.onDismiss = onDismiss
         if let refreshPlayback = preview.refreshPlayback {
             _controller = State(initialValue: DriveVideoPlaybackController(refreshPlayback: refreshPlayback))
         } else {
@@ -4024,13 +4116,13 @@ private struct DriveVideoPreviewPage: View {
         .background(Color.black)
         .task { await controller.start(autoplay: true) }
         .onDisappear { controller.invalidate() }
-        // [修改] 视频页垂直下滑退出；横向拖进度条或 TabView 左右切换不会误触发。
+        // [修改] 视频页垂直下滑退出；横向拖进度条或左右切换不会误触发。
         .simultaneousGesture(
             DragGesture(minimumDistance: 24)
                 .onEnded { value in
                     if value.translation.height > 110,
                        abs(value.translation.width) < abs(value.translation.height) {
-                        dismiss()
+                        onDismiss()
                     }
                 }
         )
